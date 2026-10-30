@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 运行时与本地数据（不上传）
+runtime/
+config/
+cache/
+logs/
+output/
+out123/
+789/
+_removed/
+*.bak
+last_exit.txt
+
+# 实验图像（防止误传）
+*.oib
+*.oif
+*.czi
+*.lif
+*.lof
+*.xlif
+*.xlef
+*.xlcf
+*.ics
+*.ids
+
+# 图标例外
+!assets/icon.png
+!assets/icon.ico
+!assets/icon_source.png
