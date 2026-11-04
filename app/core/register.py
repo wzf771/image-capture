@@ -91,16 +91,111 @@ def channel_shifts(stack, ref_ch=0, frame=0, c_count=None):
     return out
 
 
-def drift_shifts(stack, ref_frame=0, ch=0, report=None):
-    """逐帧相对参考帧的平移：{帧号: (dx, dy, response)}。"""
+def _prep(plane):
+    """高通 + 去均值 + 归一化：相位相关只该由结构决定。"""
+    a = _highpass(plane)
+    a = a - a.mean()
+    nrm = float(np.linalg.norm(a))
+    return (a / nrm) if nrm > 0 else a
+
+
+def _phase(a, b):
+    """归一化互功率谱的峰值位置（亚像素）。"""
+    if cv2 is None:
+        return 0.0, 0.0, 0.0
+    win = (np.hanning(a.shape[0]).astype(np.float32)[:, None]
+           * np.hanning(a.shape[1]).astype(np.float32)[None, :])
+    try:
+        (dx, dy), resp = cv2.phaseCorrelate((a * win).astype(np.float32),
+                                            (b * win).astype(np.float32))
+    except Exception:                                # noqa: BLE001
+        return 0.0, 0.0, 0.0
+    return float(dx), float(dy), float(resp)
+
+
+def _phase_coarse(a, b, factor=4):
+    """缩小后做相位相关：抓得住更大的位移（大漂移时全分辨率会算飞）。"""
+    if cv2 is None:
+        return 0.0, 0.0, 0.0
+    h, w = a.shape
+    tw, th = max(32, w // factor), max(32, h // factor)
+    sa = cv2.resize(a, (tw, th), interpolation=cv2.INTER_AREA)
+    sb = cv2.resize(b, (tw, th), interpolation=cv2.INTER_AREA)
+    dx, dy, resp = _phase(_prep(sa), _prep(sb))
+    return dx * factor, dy * factor, resp
+
+
+def _gray_frame(stack, f):
+    """取一帧做配准用的单通道：多通道取最大强度，信噪比比单通道高。"""
+    arr = np.asarray(stack[f])
+    if arr.ndim == 3 and arr.shape[0] <= 8:
+        return arr.max(axis=0)
+    if arr.ndim == 3 and arr.shape[2] <= 8:
+        return arr.max(axis=2)
+    return arr
+
+
+def drift_shifts(stack, ref_frame=0, ch=0, report=None, min_resp=0.03):
+    """逐帧相对参考帧的位移：{帧号: (dx, dy, response)}。
+
+    改进点（2026-11-03，用户反馈「矫正得不行」）：
+
+    - **不再把每帧直接和参考帧比**。时间序列漂移是累积的，远处帧位移大，
+      全分辨率相位相关要么算飞、要么响应极低，估出来的位移基本是噪声。
+      现在先估**相邻帧**的小位移（可靠），再把它们沿时间轴累加成绝对位移。
+    - **双路校验**：对每帧同时做一次「与参考帧直接相关」，响应够高
+      （>= 0.08）且和累加值不矛盾时用直接值（没有累积误差），否则用累加值。
+    - **大位移兜底**：直接相关在缩小的图上再跑一遍，抓得住更大的漂移。
+    """
     out = {}
-    n = stack.shape[0]
-    c = max(0, min(int(ch), stack.shape[1] - 1))
-    ref = stack[max(0, min(int(ref_frame), n - 1)), c]
+    n = int(stack.shape[0])
+    if n <= 0:
+        return out
+    c = max(0, min(int(ch), np.asarray(stack[0]).shape[0] - 1))
+    ref = max(0, min(int(ref_frame), n - 1))
+
+    preps = []
+    try:
+        planes = [_gray_frame(stack, f) for f in range(n)]
+    except Exception:                                # noqa: BLE001
+        planes = [np.asarray(stack[f]) for f in range(n)]
     for f in range(n):
         if callable(report):
-            report(f, n, "第 %d 帧" % (f + 1))
-        out[f] = (0.0, 0.0, 1.0) if f == ref_frame else est_shift(ref, stack[f, c])
+            report(f, n, "配准第 %d/%d 帧" % (f + 1, n))
+        preps.append(_prep(planes[f]))
+
+    h, w = preps[0].shape[:2]
+    limit = 0.35 * max(w, h)                         # 超过这个位移基本不可信
+
+    # ① 相邻帧小位移 → 累加成绝对位移
+    cum = [np.zeros(2, np.float32) for _ in range(n)]
+    for f in range(1, n):
+        dx, dy, _r = _phase(preps[f - 1], preps[f])
+        if abs(dx) > limit or abs(dy) > limit:
+            dx, dy, _r = _phase_coarse(preps[f - 1], preps[f])
+        cum[f] = cum[f - 1] + np.array([dx, dy], np.float32)
+
+    base = cum[ref]
+
+    # ② 每帧再和参考帧直接对一次，响应高的用直接值
+    for f in range(n):
+        if f == ref:
+            out[f] = (0.0, 0.0, 1.0)
+            continue
+        chain = (float(cum[f][0] - base[0]), float(cum[f][1] - base[1]))
+        dx, dy, resp = _phase(preps[ref], preps[f])
+        if abs(dx) > limit or abs(dy) > limit:
+            cdx, cdy, cresp = _phase_coarse(preps[ref], preps[f])
+            if cresp > resp:
+                dx, dy, resp = cdx, cdy, cresp
+        chained_ok = (abs(dx - chain[0]) <= max(6.0, 0.06 * max(w, h))
+                      and abs(dy - chain[1]) <= max(6.0, 0.06 * max(h, w)))
+        if resp >= 0.08 and chained_ok:
+            out[f] = (dx, dy, resp)
+        elif resp >= 0.02 and chained_ok:
+            out[f] = (0.5 * (dx + chain[0]), 0.5 * (dy + chain[1]), resp)
+        else:
+            out[f] = (chain[0], chain[1], resp)
     return out
 
 

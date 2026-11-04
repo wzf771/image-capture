@@ -22,7 +22,7 @@ from core.model import GRAY, GREEN, RED                                # noqa: E
 res = {}
 ok1 = True
 found = 0
-for p in sorted(glob.glob(P(r"E:\XY\**\FRAP*.oib"), recursive=True))[:6]:
+for p in sorted(glob.glob(r"E:\XY\**\FRAP*.oib", recursive=True))[:6]:
     it = loader.probe(p)
     if len(it.channels) != 1:
         continue
@@ -34,7 +34,7 @@ for p in sorted(glob.glob(P(r"E:\XY\**\FRAP*.oib"), recursive=True))[:6]:
 print("[1] 单通道荧光 → 彩色（查了 %d 个）：%s" % (found, "OK" if (ok1 and found) else "不过"))
 res["单通道荧光"] = bool(ok1 and found)
 
-p2 = P(r"E:\XY\亚细胞定位部\3.31构载体两个\6.4\ER1.oib")
+p2 = r"E:\XY\亚细胞定位部\3.31构载体两个\6.4\ER1.oib"
 it2 = loader.probe(p2)
 roles = [(c.name, c.role) for c in it2.channels]
 ok2 = any(r == "gray" for _n, r in roles) and any(r == "green" for _n, r in roles)
@@ -56,8 +56,7 @@ res["染料给色"] = bool(ok4)
 import numpy as np                                                 # noqa: E402
 from PIL import Image                                              # noqa: E402
 from core import render                                            # noqa: E402
-from _samples import P  # noqa: E402
-imgs = (sorted(glob.glob(P(r"E:\XY\3164p.bmp.frames\*.bmp")))
+imgs = (sorted(glob.glob(r"E:\XY\3164p.bmp.frames\*.bmp"))
         + sorted(glob.glob(r"E:\ImageCapture\output\_自检\*.tif"))[:2])
 ok5 = True
 n5 = 0
@@ -78,7 +77,7 @@ print("[5] 图片格式原样进原样出（查了 %d 个）：%s" % (n5, "OK" i
 res["图片原样进出"] = bool(ok5 and n5)
 
 # 6 蔡司 CZI：通道数必须等于数据里的通道轴，名字不许带 raw 变体的 '#'
-CZI = P(r"E:\ImageCapture\789\Snap-14700-Airyscan Processing-04.czi")
+CZI = r"E:\ImageCapture\789\Snap-14700-Airyscan Processing-04.czi"
 if os.path.exists(CZI):
     itc = loader.probe(CZI)
     stc = loader.load_stack(itc)

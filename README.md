@@ -28,12 +28,14 @@
 
 ## 下载
 
-- **便携版（推荐，Windows x64）**：
-  [下载 v1.2（170 MB）](https://github.com/wzf771/image-capture/releases/download/v1.2/ImageCapture-1.2-portable-win64.zip)
-  · [所有版本](../../releases)
-  
-  解压到任意目录，双击 `Image capture.exe` 即可（无需安装 Python）。
-- **源码运行**：见下方「安装 / 运行」。
+**Windows x64 · 版本 1.0.4**
+
+| 包 | 说明 |
+|---|---|
+| ImageCapture_Setup_1.0.4.exe（66 MB） | 安装版：装到 %LOCALAPPDATA%\Programs\ImageCapture，免管理员，带开始菜单 / 桌面快捷方式与卸载项 |
+| ImageCapture_1.0.4_portable_win64.zip（96 MB） | 便携版：解压即用，绿色免安装，配置与输出都在自己目录里 |
+
+两个包都不需要预装 Python；首次启动约 2 秒。
 
 ## 功能
 

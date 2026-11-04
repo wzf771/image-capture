@@ -11,7 +11,7 @@ from PySide6.QtCore import QPointF, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QWidget
 
-ACCENT = QColor("#5B5BD6")
+ACCENT = QColor("#A8642A")
 
 
 class CropCanvas(QWidget):

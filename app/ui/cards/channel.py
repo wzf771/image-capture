@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QGridLayout, QHBoxLayout, Q
 import paths
 from core.model import CHANNEL_COLORS, FONTS, color_name
 from ui.card import ClickLabel, card
-from ui.cards._helpers import cap, pair, plab, stack
+from ui.cards._helpers import cap, cell, pair, plab, stack, two_col
 from ui.flow import FlowLayout
 from ui.widgets import (BrutalButton, FlipSwitch, FloatField, RangeSlider, RingDot,
                         Switch, ToggleSwitch)
@@ -38,7 +38,7 @@ def build(win):
         "加法：每个通道的信息都留下，重叠区叠成混合色（红+绿=黄），重叠很亮时会顶到白\n"
         "最大强度：旧算法，谁亮谁覆盖 —— 某路在 R/G/B 三路都弱时会被整路吃掉")
     win.cb_merge_mode.currentIndexChanged.connect(win.on_merge_mode)
-    c.body.addLayout(pair("叠加方式", win.cb_merge_mode))
+    c.body.addWidget(cell("叠加方式", win.cb_merge_mode))
     # 逐帧归一化（P0-4 3.25.3）：只有时间序列才显示这一组控件
     win.range_tool = QWidget()
     rt = QVBoxLayout(win.range_tool)
@@ -49,7 +49,7 @@ def build(win):
     win.cb_range_mode.addItems(["统一区间（现状）", "逐帧自动", "按参考帧"])
     win.cb_range_mode.setToolTip("时间序列的光漂白：后段会越来越黑，这里可以逐帧修正显示区间")
     win.cb_range_mode.currentIndexChanged.connect(win.on_range_mode)
-    rt.addLayout(pair("区间模式", win.cb_range_mode))
+    rt.addWidget(cell("区间模式", win.cb_range_mode))
     win.ed_p_lo = FloatField("黑点分位", decimals=1, minimum=0.0, maximum=100.0,
                              allow_empty=True, value=55.0)
     win.ed_p_hi = FloatField("白点分位", decimals=1, minimum=0.0, maximum=100.0,
@@ -57,14 +57,13 @@ def build(win):
     for w in (win.ed_p_lo, win.ed_p_hi):
         w.setToolTip("算逐帧区间用的分位数，默认 55 / 99.8（与自动区间一致）")
         w.valueChanged.connect(win.on_range_pct)
-    rt.addLayout(pair("分位", win.ed_p_lo))
-    rt.addLayout(pair("", win.ed_p_hi))
+    rt.addWidget(two_col(win.ed_p_lo, win.ed_p_hi, "黑点分位", "白点分位"))
     win.sp_ref = QSpinBox()
     win.sp_ref.setObjectName("field")
     win.sp_ref.setRange(1, 1)
     win.sp_ref.setToolTip("只有「按参考帧」用得上：以这一帧的区间宽度为基准")
     win.sp_ref.valueChanged.connect(win.on_range_ref)
-    rt.addLayout(pair("参考帧", win.sp_ref))
+    rt.addWidget(cell("参考帧", win.sp_ref))
     win.lbl_range_warn = QLabel("")
     win.lbl_range_warn.setObjectName("muted")
     win.lbl_range_warn.setWordWrap(True)

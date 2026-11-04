@@ -11,10 +11,9 @@ sys.path.insert(0, os.path.join(APP, "app"))
 import paths                                          # noqa: E402
 from core import loader, render                       # noqa: E402
 from core.model import Group, Settings                # noqa: E402
-from _samples import P  # noqa: E402
 
-FILES = [P(r"E:\ImageCapture\789\Snap-14700-Airyscan Processing-04.czi"),
-         P(r"E:\ImageCapture\789\0.5h17.3B.lif")]
+FILES = [r"E:\ImageCapture\789\Snap-14700-Airyscan Processing-04.czi",
+         r"E:\ImageCapture\789\0.5h17.3B.lif"]
 OUT = os.path.join(paths.OUTPUT_DIR, "_格式自检")
 
 

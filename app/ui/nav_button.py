@@ -10,9 +10,9 @@ from PySide6.QtCore import QEasingCurve, QRectF, Qt, QVariantAnimation
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath
 from PySide6.QtWidgets import QGraphicsDropShadowEffect, QPushButton
 
-BASE_ON = QColor("#5B5BD6")      # 面板展开：主色
+BASE_ON = QColor("#A8642A")      # 面板展开：主色
 BASE_OFF = QColor("#FFFFFF")     # 面板收起：白底
-FILL = QColor("#5B5BD6")         # 悬停扫过的主色
+FILL = QColor("#A8642A")         # 悬停扫过的主色
 TEXT_ON = QColor("#FFFFFF")
 TEXT_OFF = QColor("#8A8AA3")
 TEXT_HOVER = QColor("#FFFFFF")

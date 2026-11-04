@@ -20,16 +20,18 @@ from PySide6.QtWidgets import QApplication                          # noqa: E402
 from core import loader                                             # noqa: E402
 from ui.main_window import MainWindow                               # noqa: E402
 
-FILES = [p for p in os.environ.get("IMAGECAPTURE_SAMPLES_CZI", "").split(";") if p]
+FILES = [
+    r"E:\ImageCapture\789\Snap-14700-Airyscan Processing-04.czi",
+    r"F:\图图图图图图小淘气\MBF相分离相关图片\xiangfenli\20260105蔡司\Snap-14708.czi",
+    r"F:\图图图图图图小淘气\MBF相分离相关图片\xiangfenli\20260105蔡司\Snap-14697.czi",
+    r"E:\ImageCapture\789\0.5h17.3B.lif",
+]
 
 
 def main():
     app = QApplication(sys.argv[:1])
     QFontDatabase.addApplicationFont(r"C:\Windows\Fonts\msyh.ttc")
     app.setFont(QFont("Microsoft YaHei", 9))
-    if not FILES:
-        print("没有 CZI/LIF 样本：设置 IMAGECAPTURE_SAMPLES_CZI 后重跑。跳过。")
-        return 0
     win = MainWindow()
     win.resize(1460, 940)
     win.items = [loader.probe(p) for p in FILES if os.path.exists(p)]

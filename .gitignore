@@ -33,3 +33,9 @@ last_exit.txt
 !assets/icon.png
 !assets/icon.ico
 !assets/icon_source.png
+
+# 打包产物（走 Releases 附件，不进仓库）
+dist/
+build/_work/
+build/installer/
+

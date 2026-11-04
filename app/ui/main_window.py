@@ -2,6 +2,8 @@
 """主界面。"""
 from __future__ import annotations
 
+import ctypes
+import ctypes.wintypes
 import os
 import math
 import time
@@ -9,11 +11,16 @@ import traceback
 import json
 
 import numpy as np
-from PySide6.QtCore import (QElapsedTimer, QEvent, QObject, QRect, QSize, Qt, QThread,
-                            QTimer, Signal)
-from PySide6.QtGui import (QColor, QCursor, QFont, QIcon, QKeySequence, QPainter,
+from PySide6.QtCore import (QEasingCurve, QElapsedTimer, QEvent, QObject, QPoint, QPointF,
+                            QPropertyAnimation, Property, QRect, QRectF, QRunnable, QSize, Qt,
+                            QThread, QThreadPool, QTimer, Signal)
+from PySide6.QtGui import (QColor, QCursor, QFont, QIcon, QImage, QKeySequence, QPainter,
+                           QPen,
                            QPixmap, QShortcut)
-from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout,
+from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QFrame,
+                               QGraphicsBlurEffect, QGraphicsDropShadowEffect, QGraphicsScene,
+                               QGraphicsPixmapItem, QHBoxLayout,
+                               QSizeGrip,
                                QDoubleSpinBox, QInputDialog, QLabel, QLineEdit,
                                QMainWindow, QMenu,
                                QMessageBox, QPushButton, QScrollArea, QSizePolicy,
@@ -34,10 +41,61 @@ from core.model import CHANNEL_COLORS, color_name
 from ui.canvas import CropCanvas
 from ui import export_dialog
 from ui.io_button import ImportButton
+from ui.magnifying_dock import MagnifyingDock
 from ui.flow import FlowLayout
 from ui import theme
-from ui.widgets import (BrutalButton, FlipSwitch, IconSlideButton, LoaderBar,
-                        RangeSlider, RingDot, SweepButton, ToggleSwitch)
+from ui.level_slider import LevelSlider
+from ui.wake_slider import PlayButton, WakeSlider
+
+
+class BodyWidget(QWidget):
+    """主区域容器：自己画一次投影并缓存，画布怎么刷都不重新模糊。"""
+
+    PAD = 16
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._shadow = None
+        self._shadow_size = None
+
+    def _make_shadow(self, w, h):
+        """一圈圈叠加出来的柔和投影，尺寸变化时才重算（一次 ~1ms）。"""
+        pad = self.PAD
+        dpr = float(self.devicePixelRatioF() or 1.0)
+        pm = QPixmap(int((w + 2 * pad) * dpr), int((h + 2 * pad) * dpr))
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setPen(Qt.NoPen)
+        for i in range(pad, 0, -2):
+            p.setBrush(QColor(33, 30, 24, 2))
+            p.drawRoundedRect(QRectF(pad - i, pad - i, w + 2 * i, h + 2 * i),
+                              10 + i, 10 + i)
+        p.end()
+        return pm
+
+    def paintEvent(self, _ev):
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor(theme.BG))
+        ws = getattr(self, "workspace", None)
+        if ws is None or not ws.isVisible():
+            return
+        g = ws.geometry()
+        if g.width() <= 0 or g.height() <= 0:
+            return
+        if self._shadow is None or self._shadow_size != (g.width(), g.height()):
+            self._shadow = self._make_shadow(g.width(), g.height())
+            self._shadow_size = (g.width(), g.height())
+        p.drawPixmap(g.x() - self.PAD, g.y() - self.PAD, self._shadow)
+
+
+class _PreviewSignals(QObject):
+    """后台渲染完成后把结果送回主线程。"""
+
+    done = Signal(object)
+from ui.widgets import (IconTextButton, SegTrack, HoverRingButton, BrutalButton, FlipSwitch, IconSlideButton, LoaderBar,
+                        RailButton, RangeSlider, RingDot, SweepButton, ToggleSwitch)
 from ui.worker import FnWorker, ThumbWorker, job_calibrate, job_export, job_probe
 
 try:
@@ -124,12 +182,16 @@ class GroupCard(QFrame):
         self.gid = group.gid
         self.setObjectName("groupCard")
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(10, 8, 10, 8)
+        lay.setContentsMargins(5, 7, 5, 7)
         lay.setSpacing(2)
         self.title = QLabel()
         self.title.setObjectName("groupTitle")
+        self.title.setAlignment(Qt.AlignCenter)
+        self.title.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.meta = QLabel()
         self.meta.setObjectName("muted")
+        self.meta.setAlignment(Qt.AlignCenter)
+        self.meta.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         lay.addWidget(self.title)
         lay.addWidget(self.meta)
         self._t = ""
@@ -143,13 +205,13 @@ class GroupCard(QFrame):
         self._elide()
 
     def _elide(self):
-        w = max(40, self.width() - 24)
-        self.title.setText(self.title.fontMetrics().elidedText(self._t, Qt.ElideRight, w))
-        self.meta.setText(self.meta.fontMetrics().elidedText(self._m, Qt.ElideRight, w))
+        for lab, txt in ((self.title, self._t), (self.meta, self._m)):
+            w = max(30, lab.width() - 2)
+            lab.setText(lab.fontMetrics().elidedText(txt, Qt.ElideRight, w))
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
-        self._elide()
+        QTimer.singleShot(0, self._elide)      # 等布局把标签宽度算好再省略
         self.title.setToolTip(self._t)
         self.meta.setToolTip(self._m)
 
@@ -239,7 +301,319 @@ class ThumbButton(QFrame):
         self.menu_requested.emit(self.path, ev.globalPos())
 
 
+
+class PanelCloser(QObject):
+    """点面板外面就收起分组面板。"""
+
+    def __init__(self, win):
+        super().__init__(win)
+        self._win = win
+
+    def eventFilter(self, obj, ev):
+        if ev.type() == QEvent.MouseButtonPress:
+            win = self._win
+            p = getattr(win, "group_panel", None)
+            if p is not None and p.isVisible():
+                try:
+                    gp = ev.globalPosition().toPoint()
+                except AttributeError:
+                    return False
+                inside = p.geometry().contains(p.mapFromGlobal(gp))
+                btn = getattr(win, "_rail", {}).get("group")
+                on_btn = (btn is not None and
+                          btn.rect().contains(btn.mapFromGlobal(gp)))
+                if not inside and not on_btn:
+                    win.close_group_panel()
+        return False
+
+
+class ResizeEdge(QWidget):
+    """无边框窗口的边缘热区：拖它 = 拉伸窗口（Qt 的 startSystemResize 在
+    没有 WS_THICKFRAME 的无边框窗口上不生效，所以自己算几何）。"""
+
+    def __init__(self, win, edges):
+        super().__init__(win)
+        self._win = win
+        self._edges = set(edges)
+        self.setCursor(self._cursor())
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+        self.setStyleSheet("background: transparent;")
+        self._press = None
+        self._geo = None
+
+    def _cursor(self):
+        e = self._edges
+        if {"left", "top"} & e and {"right", "bottom"} & e:
+            return Qt.SizeFDiagCursor
+        if {"right", "top"} <= e or {"left", "bottom"} <= e:
+            return Qt.SizeBDiagCursor
+        if e <= {"left", "right"}:
+            return Qt.SizeHorCursor
+        return Qt.SizeVerCursor
+
+    def mousePressEvent(self, ev):
+        open(r'E:\ImageCapture\logs\edge_debug.txt', 'a', encoding='utf-8').write(
+            'press %s %s\n' % (sorted(self._edges), self.geometry()))
+        if ev.button() != Qt.LeftButton:
+            return
+        self._press = ev.globalPosition().toPoint()
+        self._geo = self._win.geometry()
+        ev.accept()
+
+    def mouseMoveEvent(self, ev):
+        if self._press is None:
+            return
+        d = ev.globalPosition().toPoint() - self._press
+        g = self._geo
+        x, y, w, h = g.x(), g.y(), g.width(), g.height()
+        minw, minh = self._win.minimumWidth(), self._win.minimumHeight()
+        if "left" in self._edges:
+            nw = max(minw, w - d.x())
+            x += w - nw
+            w = nw
+        if "right" in self._edges:
+            w = max(minw, w + d.x())
+        if "top" in self._edges:
+            nh = max(minh, h - d.y())
+            y += h - nh
+            h = nh
+        if "bottom" in self._edges:
+            h = max(minh, h + d.y())
+        self._win.setGeometry(x, y, w, h)
+        ev.accept()
+
+    def mouseReleaseEvent(self, ev):
+        self._press = None
+        ev.accept()
+
+
+class SegBar(QFrame):
+    """分段控件外框：自己画白色滑块（QSS 的 border-radius 在这个子控件上不生效）。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._thumb = QRect()
+        self._anim = QPropertyAnimation(self, b"thumbRect", self)
+        self._anim.setDuration(180)
+        self._anim.setEasingCurve(QEasingCurve.OutCubic)
+
+    def get_thumb(self):
+        return self._thumb
+
+    def set_thumb(self, r):
+        self._thumb = QRect(r)
+        self.update()
+
+    thumbRect = Property(QRect, get_thumb, set_thumb)
+
+    def move_thumb(self, r, animate=True):
+        if not self._thumb.isValid():
+            self.set_thumb(r)
+        elif animate and self.isVisible():
+            self._anim.stop()
+            self._anim.setStartValue(self._thumb)
+            self._anim.setEndValue(QRect(r))
+            self._anim.start()
+        else:
+            self.set_thumb(r)
+
+    def paintEvent(self, ev):
+        super().paintEvent(ev)
+        if not self._thumb.isValid():
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setPen(QPen(QColor(33, 30, 24, 18), 1.0))
+        p.setBrush(QColor("#FFFFFF"))
+        p.drawRoundedRect(QRectF(self._thumb).adjusted(0.5, 0.5, -0.5, -0.5), 13, 13)
+
+
+class WinButton(QPushButton):
+    """标题栏窗口按钮：统一 32×28，图标用线条自绘（最小化 / 最大化·还原 / 关闭）。"""
+
+    def __init__(self, kind, parent=None):
+        super().__init__(parent)
+        self._kind = kind
+        self._hover = False
+        self._restore = False
+        self.setFixedSize(32, 28)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setObjectName("winClose" if kind == "close" else "winBtn")
+        self.setToolTip({"min": "最小化", "max": "最大化 / 还原", "close": "关闭"}[kind])
+        self.setStyleSheet("QPushButton { background: transparent; border: none; padding: 0; }")
+
+    def set_restore(self, on):
+        self._restore = bool(on)
+        self.update()
+
+    def enterEvent(self, ev):
+        self._hover = True
+        self.update()
+        super().enterEvent(ev)
+
+    def leaveEvent(self, ev):
+        self._hover = False
+        self.update()
+        super().leaveEvent(ev)
+
+    def paintEvent(self, _ev):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        r = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        close = self._kind == "close"
+        if self._hover:
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor("#C4442A") if close else QColor("#E8E5DE"))
+            p.drawRoundedRect(r, 6, 6)
+        color = QColor("#FFFFFF") if (close and self._hover) else QColor("#211E18")
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(color, 1.2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        cx, cy = r.center().x(), r.center().y()
+        if self._kind == "min":
+            p.drawLine(QPointF(cx - 5, cy), QPointF(cx + 5, cy))
+        elif self._kind == "max":
+            if self._restore:
+                p.drawRect(QRectF(cx - 5, cy - 3, 8, 8))
+                p.drawRect(QRectF(cx - 3, cy - 5, 8, 8))
+            else:
+                p.drawRect(QRectF(cx - 4.5, cy - 4.5, 9, 9))
+        else:
+            p.drawLine(QPointF(cx - 4.5, cy - 4.5), QPointF(cx + 4.5, cy + 4.5))
+            p.drawLine(QPointF(cx + 4.5, cy - 4.5), QPointF(cx - 4.5, cy + 4.5))
+
+
+class CropToggleButton(QPushButton):
+    """收起右栏后出现的展开按钮：裁剪图标 + 微红，尺寸和「隐藏裁剪框」同高。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._hover = False
+        self.setFixedSize(32, 26)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip("展开右栏")
+        self.setStyleSheet("QPushButton { background: transparent; border: none; padding: 0; }")
+
+    def enterEvent(self, ev):
+        self._hover = True
+        self.update()
+        super().enterEvent(ev)
+
+    def leaveEvent(self, ev):
+        self._hover = False
+        self.update()
+        super().leaveEvent(ev)
+
+    def paintEvent(self, _ev):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        r = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        if self._hover:
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor("#E2EFED"))
+            p.drawRoundedRect(r, 6, 6)
+        from ui.magnifying_dock import paint_svg
+        paint_svg(p, "chev_left", QRectF(r.center().x() - 9, r.center().y() - 9, 18, 18),
+                  QColor("#2E7D78"))
+
+
+class FileRow(QPushButton):
+    """组内图片：一行一个文件名（右键：删除 / 移动到其他组）。"""
+
+    menu_requested = Signal(str, object)
+
+    def __init__(self, item, parent=None):
+        super().__init__(parent)
+        self.item = item
+        self.setObjectName("fileRow")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setText(os.path.basename(item.path))
+        self.setToolTip(item.path)
+        # 横向 Ignored：允许被压到可视区宽度，省略号才会生效（否则按文字宽度撑开、右侧被裁）
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        self.setMinimumWidth(0)
+        self.setMinimumHeight(24)
+        self.setProperty("active", False)
+        self._full = os.path.basename(item.path)
+
+    def _elide(self):
+        fm = self.fontMetrics()
+        self.setText(fm.elidedText(self._full, Qt.ElideRight,
+                                   max(16, self.width() - 6)))
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        self._elide()
+
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        self._elide()
+
+    def set_active(self, on):
+        self.setProperty("active", bool(on))
+        st = self.style()
+        st.unpolish(self)
+        st.polish(self)
+        self.update()
+
+    def contextMenuEvent(self, ev):
+        self.menu_requested.emit(self.item.path, ev.globalPos())
+
+    # 兼容旧缩略图接口
+    def set_thumb(self, _p):
+        pass
+
+    def set_meta(self, _it):
+        pass
+
+    def warn(self, _on):
+        pass
+
+
+
+_WS_THICKFRAME = 0x00040000
+_WS_MAXIMIZEBOX = 0x00010000
+_WS_MINIMIZEBOX = 0x00020000
+_WS_SYSMENU = 0x00080000
+_GWL_STYLE = -16
+_SWP_NOMOVE = 0x0002
+_SWP_NOSIZE = 0x0001
+_SWP_NOZORDER = 0x0004
+_SWP_FRAMECHANGED = 0x0020
+
+
+class _RECT(ctypes.Structure):
+    _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+
+class _NCCALCSIZE_PARAMS(ctypes.Structure):
+    _fields_ = [("rgrc", _RECT * 3), ("lppos", ctypes.c_void_p)]
+
+
+def _install_native_frame(win, border=6):
+    """给无边框窗口补上 WS_THICKFRAME，交给系统做贴边分屏和边缘缩放。
+
+    返回 True 表示成功（此时自绘的 ResizeEdge 热区可以关掉）。
+    """
+    try:
+        hwnd = int(win.winId())
+        u = ctypes.windll.user32
+        style = u.GetWindowLongW(hwnd, _GWL_STYLE)
+        u.SetWindowLongW(hwnd, _GWL_STYLE,
+                         style | _WS_THICKFRAME | _WS_MAXIMIZEBOX
+                         | _WS_MINIMIZEBOX | _WS_SYSMENU)
+        u.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
+                       _SWP_NOMOVE | _SWP_NOSIZE | _SWP_NOZORDER | _SWP_FRAMECHANGED)
+        return True
+    except Exception:                            # noqa: BLE001
+        return False
+
+
 # ------------------------------------------------------------------ 主窗口
+_FRAMELESS = True          # 无边框窗口 + 自绘标题栏
+_HT = dict(client=1, caption=2, left=10, right=11, top=12, topleft=13,
+           topright=14, bottom=15, bottomleft=16, bottomright=17)
+
 
 class MainWindow(QMainWindow):
 
@@ -291,19 +665,31 @@ class MainWindow(QMainWindow):
         self._clip_channel = None        # 通道"复制/粘贴"用的应用内剪贴板
         self._frame_range_worker = None
         self.cur_t = 0                   # 当前时间点 / Z 层（P0-3）
+        # —— 快速模式：播放 / 拖动时间轴时，预览渲染放到后台线程
+        self._fast = False
+        self._switching = False
+        # 自检脚本（IMAGECAPTURE_NO_SAVE=1）里强制同步渲染，保证用例语义不变
+        self._async_ok = (os.environ.get("IMAGECAPTURE_NO_SAVE") != "1"
+                          and QApplication.platformName() != "offscreen")
+        self._prev_gen = 0
+        self._prev_busy = False
+        self._prev_pending = None
+        self._preview_signals = _PreviewSignals()
+        self._preview_signals.done.connect(self._on_preview_done)
+        self._preview_pool = QThreadPool(self)
+        self._preview_pool.setMaxThreadCount(1)
         self.cur_z = 0
         self.setWindowTitle("Image capture %s · 显微图像统一视野裁剪" % APP_VERSION)
+        if _FRAMELESS:
+            self.setWindowFlag(Qt.FramelessWindowHint, True)
+            self.setAttribute(Qt.WA_TranslucentBackground, False)
+        self._titlebar = None
         self.setMinimumSize(720, 520)
         self.resize(1320, 880)
         self._build()
         # 恢复上次的左右栏展开状态
-        for btn, on in ((self.btn_left, self.settings.ui_left),
-                        (self.btn_right, self.settings.ui_right)):
-            btn.blockSignals(True)
-            btn.setChecked(on)
-            btn.blockSignals(False)
         self.left_holder.setVisible(self.settings.ui_left)
-        self.right_holder.setVisible(self.settings.ui_right)
+        self.set_right_collapsed(not self.settings.ui_right, remember=False)
         # 上次是不是"只看图"（不画裁剪框）
         self.btn_hide_box.blockSignals(True)
         self.btn_hide_box.setChecked(not bool(getattr(self.settings, "show_box", True)))
@@ -329,58 +715,62 @@ class MainWindow(QMainWindow):
     def _build(self):
         root = QWidget()
         self.setCentralWidget(root)
-        outer = QVBoxLayout(root)
-        outer.setContentsMargins(11, 10, 11, 10)
+        shell = QVBoxLayout(root)
+        shell.setContentsMargins(0, 0, 0, 0)
+        shell.setSpacing(0)
+        titlebar = self._build_titlebar()
+        self._titlebar = titlebar
+        shell.addWidget(titlebar)
+
+        body = BodyWidget()
+        self._body = body
+        shell.addWidget(body, 1)
+        outer = QVBoxLayout(body)
+        outer.setContentsMargins(12, 10, 12, 10)
         outer.setSpacing(9)
 
-        # 顶栏
-        top = QHBoxLayout()
-        title = QLabel("Image capture")
-        title.setObjectName("appTitle")
-        sub = QLabel("v%s · 原生读 OIB / CZI / LIF · 也支持 TIFF / PNG / JPG / BMP" % APP_VERSION)
-        sub.setObjectName("muted")
-        top.addWidget(title)
-        top.addWidget(sub)
-        top.addStretch(1)
-        # 工程 / 撤销：文件操作在前，视图开关在后（用户熟悉的工具栏顺序）
+        # 顶部工具行已按要求整行删除（2026-11-02）：
+        # 导入 → 左侧「导入」图标，工程 → 左下角「设置」，撤销/重做先移除界面、保留快捷键。
+        # 控件仍然创建但隐藏，避免其它代码（_update_undo_buttons 等）引用时报错。
         self.btn_proj = BrutalButton("工程")
-        self.btn_proj.setToolTip("新建 / 打开 / 保存工程（.icproj）· 最近打开 · 重新探测元数据")
         self.btn_proj.clicked.connect(self.project_menu)
         self.btn_undo = BrutalButton("撤销")
         self.btn_redo = BrutalButton("重做")
         self.btn_undo.clicked.connect(self.do_undo)
         self.btn_redo.clicked.connect(self.do_redo)
-        for b in (self.btn_proj, self.btn_undo, self.btn_redo):
-            top.addWidget(b)
-        self.btn_left = BrutalButton("左栏")
-        self.btn_right = BrutalButton("右栏")
-        for btn, side in ((self.btn_left, "left"), (self.btn_right, "right")):
-            btn.setCheckable(True)
-            btn.setChecked(True)
-            btn.setToolTip("点一下收起 / 展开这一栏，收起后中间显示区会变大")
-            btn.toggled.connect(lambda on, s=side: self.toggle_side(s, on))
-        top.addWidget(self.btn_left)
-        top.addWidget(self.btn_right)
         self.btn_import = ImportButton("Get started")
-        self.btn_import.setToolTip("导入文件夹（可含子目录）或单个/多个文件")
         self.btn_import.clicked.connect(self.import_menu)
-        top.addWidget(self.btn_import)
-        outer.addLayout(top)
+        for _b in (self.btn_proj, self.btn_undo, self.btn_redo, self.btn_import):
+            _b.setVisible(False)
 
         # 三栏：左 1 : 中 3 : 右 2
         mid = QHBoxLayout()
         mid.setSpacing(9)
         # 左右固定宽度，中间吃掉全部剩余空间（图片区最大）
-        self.left_holder = self._side_scroll(self._build_left(), 232)
-        self.right_holder = self._side_scroll(self._build_right(), 348)
+        self.left_holder = self._build_left()
+        self.right_holder = self._build_right()
+
+        # 画布 + 右侧工具栏包在同一块白底板上（2026-11-03 用户要求）
+        self.workspace = QFrame()
+        self.workspace.setObjectName("workspace")
+        # 悬浮投影改成「父层一次性画好、缓存成 pixmap」——
+        # QGraphicsDropShadowEffect 会让每次画布重绘都走离屏+模糊（实测 1.3ms → 20.2ms）。
+        wl = QHBoxLayout(self.workspace)
+        wl.setContentsMargins(0, 0, 0, 0)
+        wl.setSpacing(0)
+        wl.addWidget(self._build_center(), 1)
+        wl.addWidget(self.right_holder, 0)
+
         mid.addWidget(self.left_holder, 0)
-        mid.addWidget(self._build_center(), 1)
-        mid.addWidget(self.right_holder, 0)
+        body.workspace = self.workspace          # 让 BodyWidget 知道画谁的投影
+        mid.addWidget(self.workspace, 1)
         outer.addLayout(mid, 1)
 
-        # 底栏（通栏白条）
+        # 底栏已按要求整行删除（2026-11-03）：控件仍然创建（很多地方要 setText），
+        # 但放进一个隐藏容器里，不占任何可见空间。
         foot = QFrame()
-        foot.setObjectName("card")
+        foot.setObjectName("bottombar")
+        foot.setVisible(False)
         bottom = QHBoxLayout(foot)
         bottom.setContentsMargins(14, 9, 14, 9)
         bottom.setSpacing(10)
@@ -398,47 +788,222 @@ class MainWindow(QMainWindow):
         bottom.addWidget(self.lbl_status)
         bottom.addWidget(self.btn_export)
         outer.addWidget(foot)
+        foot.hide()
+        self.select_right_tab("crop")
         self._sync_pills()          # 右栏胶囊的文字跟真实参数对齐
+        # 无边框窗口没有系统边框：八个透明热区负责拉伸
+        self._edges = []
+        for edges in ({"left"}, {"right"}, {"top"}, {"bottom"},
+                      {"left", "top"}, {"right", "top"},
+                      {"left", "bottom"}, {"right", "bottom"}):
+            w = ResizeEdge(self, edges)
+            w.setToolTip("")
+            self._edges.append(w)
         self._wheel_guard = WheelScrollGuard(self)
         QApplication.instance().installEventFilter(self._wheel_guard)
 
-    def _build_left(self):
-        rail = QFrame()
-        rail.setObjectName("rail")
-        lay = QVBoxLayout(rail)
-        lay.setContentsMargins(12, 12, 12, 12)
-        lay.setSpacing(9)
+    # ------------------------------------------------------------ 标题栏
+    def _build_titlebar(self):
+        """自绘标题栏：拖动 / 双击最大化交给系统（WM_NCHITTEST 返回 HTCAPTION）。"""
+        bar = QFrame()
+        bar.setObjectName("titlebar")
+        bar.setFixedHeight(42)
+        lay = QHBoxLayout(bar)
+        lay.setContentsMargins(12, 0, 8, 0)
+        lay.setSpacing(10)
 
-        brand = QHBoxLayout()
-        brand.setSpacing(9)
         mark = QLabel()
-        mark.setFixedSize(28, 28)
-        mark.setStyleSheet(
-            "border-radius:9px;background:qlineargradient(x1:0,y1:0,x2:1,y2:1,"
-            "stop:0 %s,stop:0.6 #8E7BFF,stop:1 %s);" % (theme.PRIMARY, theme.MINT))
-        bt = QVBoxLayout()
-        bt.setSpacing(1)
-        b1 = QLabel("Image capture")
-        b1.setStyleSheet("font-weight:700;font-size:12.5px;color:#fff;")
-        b2 = QLabel("统一视野裁剪")
-        b2.setObjectName("railSub")
-        bt.addWidget(b1)
-        bt.addWidget(b2)
-        brand.addWidget(mark)
-        brand.addLayout(bt)
-        brand.addStretch(1)
-        lay.addLayout(brand)
+        # 标题栏图标：黑白线条显微镜（assets/icon_line_44.png，2x 供高分屏）
+        mark.setFixedSize(22, 22)
+        _icon = os.path.join(paths.ROOT, "assets", "icon_line_44.png")
+        if not os.path.exists(_icon):
+            _icon = os.path.join(paths.ROOT, "assets", "icon_line.png")
+        _pm = QPixmap(_icon)
+        if not _pm.isNull():
+            if _pm.width() > 44:
+                _pm = _pm.scaled(44, 44, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            _pm.setDevicePixelRatio(2.0)      # 逻辑尺寸 22px，物理 44px，边缘更实
+            mark.setPixmap(_pm)
+        else:
+            mark.setStyleSheet("border-radius:6px;background:%s;" % theme.PRIMARY)
+        lay.addWidget(mark)
 
-        cap = QLabel("分组")
-        cap.setObjectName("railCap")
-        lay.addWidget(cap)
+        name = QLabel("Image capture")
+        name.setObjectName("appTitle")
+        lay.addWidget(name)
+
+        # 组信息挪到标题栏：名称加粗，后面跟一行细节
+        lay.addSpacing(14)
+        self.lbl_group_head = QLabel("还没有导入图片")
+        self.lbl_group_head.setObjectName("titleGroup")
+        lay.addWidget(self.lbl_group_head)
+        self.lbl_group_info = QLabel("")
+        self.lbl_group_info.setObjectName("muted")
+        lay.addWidget(self.lbl_group_info)
+
+        lay.addSpacing(10)
+        self.lbl_title_doc = QLabel("")
+        self.lbl_title_doc.setObjectName("muted")
+        lay.addWidget(self.lbl_title_doc)
+        lay.addStretch(1)
+
+        view_row = QHBoxLayout()
+        view_row.setContentsMargins(0, 0, 0, 0)
+        view_row.setSpacing(6)
+        self.seg_view = None
+        self.btn_view_full = IconTextButton("原图", "scan_barcode")
+        self.btn_view_full.setToolTip("显示整张原图；滚轮缩放、拖动平移、双击回到整图")
+        self.btn_view_crop = IconTextButton("裁剪", "scissors")
+        for b, mode in ((self.btn_view_full, "full"), (self.btn_view_crop, "crop")):
+            b.setCheckable(True)
+            b.clicked.connect(lambda _c=False, m=mode: self.set_view_mode(m))
+            view_row.addWidget(b)
+        self.btn_view_full.setChecked(True)
+        # 只看图（2026-09-26 用户要求）：不画裁剪框、也不压暗四周，
+        # 方便整体观察和往图上加 ROI。勾上 = 隐藏框。
+        self.btn_hide_box = IconTextButton("隐藏", "dashed_x")
+        self.btn_hide_box.setCheckable(True)
+        self.btn_hide_box.setToolTip(
+            "只看图：不画裁剪框、四周也不压暗，方便观察图像和加 ROI\n"
+            "（再点一下恢复裁剪框；裁剪结果视图里这个按钮不生效）")
+        self.btn_hide_box.toggled.connect(self.on_hide_box)
+        view_row.addWidget(self.btn_hide_box)
+        self.btn_expand = CropToggleButton()
+        self.btn_expand.setVisible(False)
+        self.btn_expand.clicked.connect(lambda: self.set_right_collapsed(False))
+        lay.addLayout(view_row)
+        # 占位：宽度 = 右侧面板宽度 - 展开按钮与间距，分段控件就落回原来那列的右边缘
+        self._title_gap = QWidget()
+        self._title_gap.setFixedWidth(0)
+        lay.addWidget(self._title_gap)
+        lay.addWidget(self.btn_expand)
+
+        lay.addSpacing(10)
+
+        b_min = WinButton("min")
+        b_min.clicked.connect(self.showMinimized)
+        self.b_max = WinButton("max")
+        self.b_max.clicked.connect(self._toggle_max)
+        b_close = WinButton("close")
+        b_close.clicked.connect(self.close)
+        lay.addSpacing(4)
+        for b in (b_min, self.b_max, b_close):
+            lay.addWidget(b)
+        return bar
+
+    def _toggle_max(self):
+        if self.isMaximized():
+            self.showNormal()
+            if hasattr(self, "b_max"):
+                self.b_max.set_restore(False)
+        else:
+            self.showMaximized()
+            if hasattr(self, "b_max"):
+                self.b_max.set_restore(True)
+
+    def nativeEvent(self, eventType, message):
+        """无边框窗口的边缘缩放 / 标题栏拖动，交给系统原生命中测试。"""
+        if _FRAMELESS and eventType == b"windows_generic_MSG":
+            try:
+                msg = ctypes.wintypes.MSG.from_address(int(message))
+            except Exception:
+                return super().nativeEvent(eventType, message)
+            if not getattr(self, "_native_frame", False):
+                return super().nativeEvent(eventType, message)
+            try:
+                pass
+            except Exception:                        # noqa: BLE001
+                pass
+            if msg.message == 0x0083:                       # WM_NCCALCSIZE
+                # 客户区 = 整窗：加了 WS_THICKFRAME 也不出现系统边框；
+                # 但「最大化」要按系统边框内缩，否则会盖住任务栏、四周被切
+                if msg.wParam:
+                    hwnd = int(self.winId())
+                    u = ctypes.windll.user32
+                    try:
+                        if u.IsZoomed(hwnd):
+                            par = _NCCALCSIZE_PARAMS.from_address(int(msg.lParam))
+                            pad = u.GetSystemMetrics(32) + u.GetSystemMetrics(92)
+                            par.rgrc[0].left += pad
+                            par.rgrc[0].top += pad
+                            par.rgrc[0].right -= pad
+                            par.rgrc[0].bottom -= pad
+                    except Exception:                # noqa: BLE001
+                        pass
+                return True, 0
+            if msg.message == 0x0084:                       # WM_NCHITTEST
+                x = ctypes.c_short(msg.lParam & 0xFFFF).value
+                y = ctypes.c_short((msg.lParam >> 16) & 0xFFFF).value
+                # lParam 是物理像素；Qt 的全局坐标是设备无关像素
+                dpr = self.devicePixelRatioF() or 1.0
+                pos = self.mapFromGlobal(QPoint(int(x / dpr), int(y / dpr)))
+                # 先判边缘：系统自己的缩放热区（6 逻辑像素，跟自绘热区一致）
+                if getattr(self, "_native_frame", False):
+                    b = max(4, int(round(6 * dpr)))
+                    w, h = self.width(), self.height()
+                    left = pos.x() < b
+                    right = pos.x() >= w - b
+                    top = pos.y() < b
+                    bottom = pos.y() >= h - b
+                    if top and left:
+                        return True, _HT["topleft"]
+                    if top and right:
+                        return True, _HT["topright"]
+                    if bottom and left:
+                        return True, _HT["bottomleft"]
+                    if bottom and right:
+                        return True, _HT["bottomright"]
+                    if left:
+                        return True, _HT["left"]
+                    if right:
+                        return True, _HT["right"]
+                    if top:
+                        return True, _HT["top"]
+                    if bottom:
+                        return True, _HT["bottom"]
+                tb = getattr(self, "_titlebar", None)
+                if tb is not None and pos.y() < tb.geometry().bottom() + 1:
+                    child = self.childAt(pos)
+                    if isinstance(child, QPushButton):
+                        return True, _HT["client"]
+                    return True, _HT["caption"]
+        return super().nativeEvent(eventType, message)
+
+    def _build_left(self):
+        """左栏只有一列：图标在上；点「分组」时内容在图标正下方展开、设置之前，不是另开一页。"""
+        wrap = QFrame()
+        wrap.setObjectName("leftWrap")
+        wrap.setFixedWidth(76)
+        col = QVBoxLayout(wrap)
+        col.setContentsMargins(2, 8, 2, 8)
+        col.setSpacing(2)
+
+        self._rail = {}
+        for key, text in (("import", "导入"), ("group", "分组")):
+            b = RailButton(key, text)
+            b.clicked.connect(lambda _c=False, k=key: self.on_rail(k))
+            if key == "import":
+                b.setCheckable(False)       # 动作型按钮，不要留灰色勾选底
+                b.setToolTip("导入图片文件（可多选）；右键导入整个采集目录")
+                b.setContextMenuPolicy(Qt.CustomContextMenu)
+                b.customContextMenuRequested.connect(
+                    lambda _p: self.import_folder())
+            col.addWidget(b, 0, Qt.AlignLeft)
+            self._rail[key] = b
+
+        # —— 展开区：紧贴在「分组」下面 ——
+        panel = QWidget()
+        panel.setObjectName("groupPanel")
+        lay = QVBoxLayout(panel)
+        lay.setContentsMargins(0, 6, 0, 4)
+        lay.setSpacing(6)
 
         self.group_host = QWidget()
         self.group_host.setObjectName("groupHost")
         self.group_host.setAutoFillBackground(False)
         self.group_layout = QVBoxLayout(self.group_host)
         self.group_layout.setContentsMargins(0, 0, 0, 0)
-        self.group_layout.setSpacing(6)
+        self.group_layout.setSpacing(4)
         self.group_layout.addStretch(1)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -447,84 +1012,104 @@ class MainWindow(QMainWindow):
         gvp = scroll.viewport()
         gvp.setObjectName("groupVp")
         gvp.setAutoFillBackground(False)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.setStyleSheet("#groupVp, #groupHost { background: transparent; }")
-        scroll.setMinimumHeight(120)
+        scroll.setMinimumHeight(90)
         lay.addWidget(scroll, 1)
 
-        rowb = QHBoxLayout()
-        rowb.setSpacing(6)
-        b_new = SweepButton("新建组")
+        b_new = SweepButton("+Group")
+        b_new.setFixedWidth(64)
+        b_new.setToolTip("新建一个分组")
         b_new.clicked.connect(self.new_group)
-        b_clear = SweepButton("清空")
-        b_clear.setToolTip("把列表里的图片全部移出（不动原文件）")
-        b_clear.clicked.connect(self.clear_all)
-        rowb.addWidget(b_new)
-        rowb.addWidget(b_clear)
-        lay.addLayout(rowb)
+        lay.addWidget(b_new, 0, Qt.AlignHCenter)
 
-        rc = QFrame()
-        rc.setObjectName("railCard")
-        rl = QVBoxLayout(rc)
-        rl.setContentsMargins(11, 10, 11, 10)
-        rl.setSpacing(7)
-        t = QLabel("标定")
-        t.setStyleSheet("font-weight:700;font-size:12px;color:#fff;")
-        rl.addWidget(t)
-        self.lbl_src = QLabel("文件自带 0 · 标尺识别 0 · 手动 0")
+        # 「标定」块已按要求删除；计数仍会更新，但不再显示
+        self.lbl_src = QLabel("")
         self.lbl_src.setObjectName("railSub")
-        self.lbl_src.setWordWrap(True)
-        rl.addWidget(self.lbl_src)
-        self.btn_calib = SweepButton("自动识别标尺")
-        self.btn_calib.setToolTip("对所有还没有标定的图做一次标尺识别 + 认字")
-        self.btn_calib.clicked.connect(self.auto_calibrate)
-        rl.addWidget(self.btn_calib)
-        drop = QLabel("把文件夹、OIB / CZI / LIF\n拖到这里导入")
-        drop.setObjectName("railSub")
-        drop.setWordWrap(True)
-        drop.setAlignment(Qt.AlignCenter)
-        drop.setMinimumHeight(46)
-        drop.setStyleSheet("border:1px dashed rgba(255,255,255,0.25);border-radius:12px;"
-                           "color:rgba(255,255,255,0.6);padding:8px;")
-        rl.addWidget(drop)
-        lay.addWidget(rc, 0)
+        self.lbl_src.setVisible(False)
+        self.btn_calib = None
+
+        cap2 = QLabel("组内图片")
+        cap2.setObjectName("railCap")
+        cap2.setAlignment(Qt.AlignCenter)
+        lay.addWidget(cap2)
+        self.file_host = QWidget()
+        self.file_host.setObjectName("fileHost")
+        self.file_host.setAutoFillBackground(False)
+        self.strip_layout = QVBoxLayout(self.file_host)
+        self.strip_layout.setContentsMargins(0, 0, 0, 0)
+        self.strip_layout.setSpacing(2)
+        self.strip_layout.addStretch(1)
+        fscroll = QScrollArea()
+        fscroll.setObjectName("fileScroll")
+        fscroll.setWidgetResizable(True)
+        fscroll.setWidget(self.file_host)
+        fscroll.setFrameShape(QFrame.NoFrame)
+        fscroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        fscroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        fvp = fscroll.viewport()
+        fvp.setObjectName("fileVp")
+        fvp.setAutoFillBackground(False)
+        fscroll.setStyleSheet("#fileVp, #fileHost { background: transparent; }")
+        fscroll.setMinimumHeight(80)
+        lay.addWidget(fscroll, 1)
+        self.strip_host = self.file_host          # 兼容旧名字
+
+
+        panel.hide()
+        col.addWidget(panel, 1)
+        self._left_stretch = col.count()
+        col.addStretch(1)                      # 收起时把「设置」顶到底部
+
+        b_set = RailButton("settings", "设置")
+        b_set.setCheckable(False)
+        b_set.clicked.connect(self.project_menu)
+        col.addWidget(b_set, 0, Qt.AlignLeft)
+        self._rail_settings = b_set
+
+        # 导出：只留图标，放在「设置」下面（底栏已删除）
+        col.addSpacing(2)
+        b_dl = RailButton("export", "导出")
+        b_dl.setCheckable(False)
+        b_dl.setToolTip("导出：先勾要导出的图片，再勾导出内容")
+        b_dl.clicked.connect(self.export_menu)
+        col.addWidget(b_dl, 0, Qt.AlignLeft)
+        self._rail_download = b_dl
+
         self.setAcceptDrops(True)
-        return rail
+        self.group_panel = panel
+        self.left_col = col
+        self._left_stretch = col.count() - 2   # 面板之后那个 stretch
+        return wrap
+
+    def on_rail(self, key):
+        """左栏导航：导入 / 分组弹出面板 / 其余切右栏标签。"""
+        if key == "import":
+            self.import_files()         # 左键：选单个/多个文件；右键：选采集目录
+            return
+        if key == "group":
+            vis = not self.group_panel.isVisible()
+            self._rail["group"].setChecked(vis)
+            self.group_panel.setVisible(vis)
+            if hasattr(self, "left_col"):
+                self.left_col.setStretch(self._left_stretch, 0 if vis else 1)
+            self.left_holder.updateGeometry()
+            return
+        mapping = {"crop": "crop", "ruler": "ruler", "channel": "channel",
+                   "roi": "measure", "process": "process"}
+        self.group_panel.setVisible(False)
+        for k, b in self._rail.items():
+            b.setChecked(k == key)
+        self.select_right_tab(mapping.get(key, "crop"))
 
     def _build_center(self):
         col = QWidget()
+        col.setObjectName("centerCol")          # 透明：让外层白底板透出来
         lay = QVBoxLayout(col)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(9)
 
         # 头部：组信息 + 视图切换
-        head = QHBoxLayout()
-        head.setSpacing(8)
-        self.lbl_group_head = QLabel("还没有导入图片")
-        self.lbl_group_head.setStyleSheet("font-weight:700;font-size:13.5px;")
-        self.lbl_group_info = QLabel("")
-        self.lbl_group_info.setObjectName("muted")
-        head.addWidget(self.lbl_group_head)
-        head.addWidget(self.lbl_group_info)
-        head.addStretch(1)
-        self.btn_view_full = BrutalButton("原图显示")
-        self.btn_view_full.setToolTip("显示整张原图；滚轮缩放、拖动平移、双击回到整图")
-        self.btn_view_crop = BrutalButton("裁剪结果")
-        for b, mode in ((self.btn_view_full, "full"), (self.btn_view_crop, "crop")):
-            b.setCheckable(True)
-            b.clicked.connect(lambda _c=False, m=mode: self.set_view_mode(m))
-            head.addWidget(b)
-        self.btn_view_full.setChecked(True)
-        # 只看图（2026-09-26 用户要求）：不画裁剪框、也不压暗四周，
-        # 方便整体观察和往图上加 ROI。勾上 = 隐藏框。
-        self.btn_hide_box = BrutalButton("隐藏裁剪框")
-        self.btn_hide_box.setCheckable(True)
-        self.btn_hide_box.setToolTip(
-            "只看图：不画裁剪框、四周也不压暗，方便观察图像和加 ROI\n"
-            "（再点一下恢复裁剪框；裁剪结果视图里这个按钮不生效）")
-        self.btn_hide_box.toggled.connect(self.on_hide_box)
-        head.addWidget(self.btn_hide_box)
-        lay.addLayout(head)
-
         # 画布
         self.canvas = CropCanvas()
         self.canvas.box_changed.connect(self.on_box_changed)
@@ -549,42 +1134,52 @@ class MainWindow(QMainWindow):
         bl.addWidget(self.canvas_square, 1)
         lay.addWidget(box, 1)
 
+
+
         # 信息胶囊行（自动换行，不会顶出边框）
         chip_card = QFrame()
-        chip_card.setObjectName("card")
+        chip_card.setObjectName("chipCard")
         cl = QVBoxLayout(chip_card)
-        cl.setContentsMargins(11, 9, 11, 9)
-        cl.setSpacing(6)
+        cl.setContentsMargins(11, 2, 11, 0)
+        cl.setSpacing(2)
         chips = QWidget()
-        chips.setLayout(FlowLayout(chips, spacing=6))
-        self.chip_layout = chips.layout()
+        chips.setObjectName("chipStrip")
+        self.chip_layout = QHBoxLayout(chips)
+        self.chip_layout.setContentsMargins(0, 0, 0, 0)
+        self.chip_layout.setSpacing(8)
         self.lbl_px = QLabel("")
         self.lbl_px.setObjectName("chip")
         self.lbl_size = QLabel("—")
         self.lbl_size.setObjectName("chip")
+        hint = QLabel("滚轮缩放 · 拖动平移 · 双击复位")
+        hint.setObjectName("chip")
+        # 三个方框等宽等高（2026-11-03 用户要求：这一行大小一致）
+        for w in (self.lbl_px, self.lbl_size, hint):
+            w.setAlignment(Qt.AlignCenter)
+            w.setFixedHeight(26)
+            self.chip_layout.addWidget(w, 1)
+
+        # 「组内裁剪框位置一致」放到信息条右侧（原来在左栏）
         self.chk_sync = ToggleSwitch()
         self.chk_sync.setToolTip("组内裁剪框位置一致")
         self.chk_sync.setChecked(self.settings.__dict__.get("group_sync", True))
         self.chk_sync.toggled.connect(self.on_sync_toggled)
-        hint = QLabel("滚轮缩放 · 拖动平移 · 双击复位")
-        hint.setObjectName("chip")
-        self.chip_layout.addWidget(self.lbl_px)
-        self.chip_layout.addWidget(self.lbl_size)
-        self.chip_layout.addWidget(hint)
-        cl.addWidget(chips)
-        opts = QHBoxLayout()
-        opts.setSpacing(8)
-        opts.addWidget(self.chk_sync)
-        lab_sync = ClickLabel("组内裁剪框位置一致")
+        lab_sync = ClickLabel("裁剪框一致")
+        lab_sync.setObjectName("chip")
         lab_sync.setCursor(Qt.PointingHandCursor)
-        lab_sync.setToolTip("点这里也能开关")
+        lab_sync.setToolTip("点这里也能开关：组内裁剪框位置一致")
         lab_sync.clicked.connect(self.chk_sync.toggle)
-        opts.addWidget(lab_sync)
-        opts.addStretch(1)
-        cl.addLayout(opts)
+
+        chip_row = QHBoxLayout()
+        chip_row.setSpacing(8)
+        chip_row.addWidget(chips, 1)
+        chip_row.addWidget(self.chk_sync, 0)
+        chip_row.addWidget(lab_sync, 0)
+        cl.addLayout(chip_row)
 
         # Z 层 / 时间点：两行各自一条滑条（P0-3，只有多帧文件才显示）
         self.frames_row = QWidget()
+        self.frames_row.setObjectName("framesRow")
         fv = QVBoxLayout(self.frames_row)
         fv.setContentsMargins(0, 0, 0, 0)
         fv.setSpacing(4)
@@ -609,13 +1204,37 @@ class MainWindow(QMainWindow):
         fr.setSpacing(8)
         self.cap_t = QLabel("时间")
         self.cap_t.setObjectName("muted")
-        self.frame_slider = QSlider(Qt.Horizontal)      # 保留老名字：外部还有引用
+        # 时间轴用 Wake slider（Bencho，MIT）：一排细条 + 拖动拖尾
+        self.frame_slider = WakeSlider(bars=40)         # 保留老名字：外部还有引用
         self.frame_slider.setRange(1, 1)
         self.frame_slider.valueChanged.connect(self.on_frame_changed)
+        self.frame_slider.valuePreview.connect(self._preview_frame_label)
+        self.frame_slider.dragStarted.connect(lambda: setattr(self, "_fast", True))
+        self.frame_slider.dragEnded.connect(lambda: setattr(self, "_fast", False))
+        # 自动播放：紧挨「时间」标签
+        self.btn_play = PlayButton()
+        self.btn_play.setToolTip("自动播放时间序列（再点一下暂停）")
+        self.btn_play.toggled.connect(self.on_play_toggled)
+        self.cb_speed = QComboBox()
+        self.cb_speed.setObjectName("field")
+        self.cb_speed.setFixedWidth(72)
+        self.cb_speed.addItems(["1/4x", "1/2x", "1x", "2x", "3x"])
+        self.cb_speed.setCurrentIndex(2)
+        self.cb_speed.setToolTip("播放速度：1x = 4 秒放 50 张（12.5 帧/秒）")
+        self.cb_speed.currentIndexChanged.connect(self._restart_play)
+        self._popup_open = False
+        try:
+            self.cb_speed.view().installEventFilter(self)
+        except Exception:                        # noqa: BLE001
+            pass
+        self._play_timer = QTimer(self)
+        self._play_timer.timeout.connect(self._play_step)
         self.lbl_frame = QLabel("第 1 点 / 共 1 点")
         self.lbl_frame.setObjectName("chip")
         self.t_row = QWidget()
         fr.addWidget(self.cap_t)
+        fr.addWidget(self.btn_play)
+        fr.addWidget(self.cb_speed)
         fr.addWidget(self.frame_slider, 1)
         fr.addWidget(self.lbl_frame)
         self.t_row.setLayout(fr)
@@ -628,30 +1247,10 @@ class MainWindow(QMainWindow):
         fv.addWidget(self.btn_declare)
         cl.addWidget(self.frames_row)
         self.frames_card = self.frames_row
+        # 落在页面底色上（与底部条同色），但宽度仍限定在中间列，不占右侧工具栏
+        self._chip_card = chip_card
         lay.addWidget(chip_card)
 
-        # 组内图片
-        c = card("组内图片", "点选 · 右键菜单", module=True)
-        c.on_settled = self.after_slide        # 滑完再补预览刷新，别卡在收尾
-        self.strip_host = QWidget()
-        self.strip_host.setObjectName("stripHost")
-        self.strip_host.setAutoFillBackground(False)
-        self.strip_layout = QHBoxLayout(self.strip_host)
-        self.strip_layout.setContentsMargins(0, 0, 0, 0)
-        self.strip_layout.setSpacing(8)
-        self.strip_layout.addStretch(1)
-        s = QScrollArea()
-        s.setWidgetResizable(True)
-        s.setWidget(self.strip_host)
-        s.setFrameShape(QFrame.NoFrame)
-        s.setFixedHeight(118)
-        s.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        svp = s.viewport()
-        svp.setObjectName("stripVp")
-        svp.setAutoFillBackground(False)
-        s.setStyleSheet("#stripVp, #stripHost { background: transparent; }")
-        c.body.addWidget(s)
-        lay.addWidget(c)
         self.frames_card.hide()
         return col
 
@@ -664,8 +1263,16 @@ class MainWindow(QMainWindow):
         lab = QLabel(text)
         h.addWidget(lab, 1)
         return h
+    RIGHT_TABS = {
+        "crop": ("裁剪视野",),
+        "ruler": ("新标尺",),
+        "channel": ("通道与颜色",),
+        "process": ("Z 投影", "处理", "标定"),
+        "measure": ("ROI 与测量",),
+    }
+
     def _build_right(self):
-        """右栏五张卡片：实现在 ui/cards/ 里，这里只负责按顺序摆好。"""
+        """右栏：标签条 + 行式属性（卡片作为分区，只在当前标签可见）。"""
         from ui.cards import calib as calib_card
         from ui.cards import channel as channel_card
         from ui.cards import crop as crop_card
@@ -674,27 +1281,80 @@ class MainWindow(QMainWindow):
         from ui.cards import ruler as ruler_card
         from ui.cards import zproj as zproj_card
 
-        col = QWidget()
-        lay = QVBoxLayout(col)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(8)
-        cards = []
+        wrap = QFrame()
+        wrap.setObjectName("rightWrap")
+        wrap.setFixedWidth(348)
+        col = QVBoxLayout(wrap)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(0)
+
+        bar = QFrame()
+        bar.setObjectName("tabbar")
+        bl = QHBoxLayout(bar)
+        bl.setContentsMargins(8, 4, 8, 4)
+        bl.setSpacing(6)
+
+        # 右栏标签用 MagnifyingDock（Bencho 放大 dock 的 Qt 移植）
+        self.dock = MagnifyingDock(
+            items=[("__collapse", "收起", "chev_right", "toggle"),
+                   ("crop", "裁剪", "crop"),
+                   ("ruler", "标尺", "ruler"),
+                   ("channel", "通道", "channel"),
+                   ("process", "处理", "process"),
+                   ("measure", "测量", "measure")],
+            item=28, gap=6, pad_x=6, pad_y=4, tip_h=22, tip_gap=2, lift=3, radius=16)
+        self.dock.activated.connect(self._on_dock_click)
+        bl.addWidget(self.dock, 1)
+        col.addWidget(bar)
+
+        area = QScrollArea()
+        area.setWidgetResizable(True)
+        area.setFrameShape(QFrame.NoFrame)
+        area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        holder = QWidget()
+        holder.setObjectName("rightBody")        # 透明：让外层白底板透出来
+        lay = QVBoxLayout(holder)
+        lay.setContentsMargins(0, 6, 4, 8)
+        lay.setSpacing(2)
+        self._cards = {}
         for mod in (crop_card, ruler_card, zproj_card, process_card, roi_card,
                     channel_card, calib_card):
             c = mod.build(self)
-            cards.append(c)
+            # 模块标题行（小锁 + 标题 + 提示）整行隐藏：右栏只留控件区
+            if getattr(c, "head", None) is not None:
+                c.head.hide()
+                c.body.setContentsMargins(12, 10, 12, 10)
+            self._cards[getattr(c, "title", "")] = c
             lay.addWidget(c)
         lay.addStretch(1)
-        # 默认排布（用户要求）：只展开「裁剪视野」与「通道与颜色」，其余折叠 ——
-        # 右栏一屏放得下，不用一直滚；点标题行随时展开，展开状态不会被改写。
-        for c in cards:
-            c.set_open(getattr(c, "title", "") in self.CARDS_OPEN_BY_DEFAULT)
-        # 「导出内容」卡片已按用户要求整块移除（2026-09-23），那批控件搬进
-        # ui/export_dialog.py 的导出弹窗里；**属性名不变**（win.chk_merge 等），
-        # 所以 _sync_settings() / _sync_pills() / pick_outdir() 一个字都不用改。
-        # 这里必须在 _build() 结束前建好，否则后面 _sync_pills() 会读不到那些控件。
+        area.setWidget(holder)
+        col.addWidget(area, 1)
+
         self.exp_dialog = export_dialog.ExportDialog(self)
-        return col
+        self._right_tab = None
+        return wrap
+
+    def _on_dock_click(self, key):
+        if key == "__collapse":
+            self.dock.set_active(index=1)          # 收起钮不进入选中态
+            self.set_right_collapsed(True)
+            return
+        self.select_right_tab(key)
+
+    def select_right_tab(self, key):
+        titles = self.RIGHT_TABS.get(key, ())
+        for title, c in getattr(self, "_cards", {}).items():
+            vis = title in titles
+            c.setVisible(vis)
+            if vis:
+                c.set_open(True)
+        self._right_tab = key
+        if getattr(self, "dock", None) is not None:
+            self.dock.set_active(key)
+        strip = getattr(self, "right_strip", None)
+        if strip is not None and getattr(self, "_right_collapsed", False):
+            name = self.RIGHT_TAB_NAMES.get(key, "")
+            strip.setText("\n".join(name))
 
     def _side_scroll(self, widget, width):
         """把左右两栏各自放进可滚动的容器：屏幕小的时候栏内滚动，不会把窗口撑大。"""
@@ -713,19 +1373,44 @@ class MainWindow(QMainWindow):
         area.setWidget(widget)
         return area
 
+    RIGHT_TAB_NAMES = {"crop": "裁剪", "ruler": "标尺", "channel": "通道",
+                       "process": "处理", "measure": "测量"}
+
+    def set_right_collapsed(self, on, remember=True):
+        """收起右栏：展开按钮出现在「隐藏裁剪框」右边（红色裁剪图标）。"""
+        on = bool(on)
+        self._right_collapsed = on
+        self.right_holder.setVisible(not on)
+        btn = getattr(self, "btn_expand", None)
+        if btn is not None:
+            btn.setVisible(on)
+        self._place_title_seg()
+        body = getattr(self, "_body", None)
+        if body is not None:
+            body.update()
+        tip = getattr(getattr(self, "dock", None), "_tip", None)
+        if tip is not None:
+            tip.hide()
+        if remember:
+            self.settings.ui_right = not on
+            self._sync_settings()
+            self.canvas.update()
+
     def toggle_side(self, side, on):
-        holder = self.left_holder if side == "left" else self.right_holder
-        holder.setVisible(on)
-        self.canvas.update()
         if side == "left":
+            self.left_holder.setVisible(on)
             self.settings.ui_left = on
         else:
-            self.settings.ui_right = on
+            self.set_right_collapsed(not on)
+        self.canvas.update()
         self._sync_settings()
         self.refresh_manifest()
 
     def showEvent(self, ev):
         super().showEvent(ev)
+        if _FRAMELESS and not getattr(self, "_native_tried", False):
+            self._native_tried = True
+            QTimer.singleShot(0, self._apply_native_frame)
         if getattr(self, "_sized", False):
             return
         self._sized = True
@@ -739,6 +1424,79 @@ class MainWindow(QMainWindow):
         self.move(g.x() + max(0, (g.width() - w) // 2),
                   g.y() + max(0, (g.height() - h) // 2))
         QTimer.singleShot(60, self._settle_cards)      # 首帧过完让卡片重新量一次高度
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        self._place_edges()
+        self._place_title_seg()
+        body = getattr(self, "_body", None)
+        if body is not None:
+            body.update()
+
+    def _place_group_panel(self):
+        """旧接口保留为空实现（面板现在就在布局里，不再定位）。"""
+
+    def close_group_panel(self):
+        p = getattr(self, "group_panel", None)
+        if p is not None and p.isVisible():
+            p.hide()
+            if hasattr(self, "left_col"):
+                self.left_col.setStretch(self._left_stretch, 1)
+        btn = getattr(self, "_rail", {}).get("group")
+        if btn is not None:
+            btn.setChecked(False)
+
+    def _place_title_seg(self):
+        """让标题栏里的视图切换正好停在「中间栏」右边缘的正上方。"""
+        gap = getattr(self, "_title_gap", None)
+        if gap is None:
+            return
+        # 右侧面板左边缘在窗口里的 x（收起时算作窗口右边缘）
+        try:
+            if self.right_holder.isVisible():
+                panel_left = self.right_holder.mapTo(self, QPoint(0, 0)).x()
+            else:
+                panel_left = self.width()
+        except Exception:                       # noqa: BLE001
+            panel_left = self.width()
+        # 从占位到窗口右边缘还有：展开按钮 + 间距 + 三个窗口按钮 + 右边距
+        exp_w = self.btn_expand.width() if self.btn_expand.isVisible() else 0
+        btns_w = self.b_max.width() * 3 + 4
+        d_right = exp_w + 10 + btns_w + 8
+        gap.setFixedWidth(max(0, self.width() - d_right - panel_left))
+
+    def _apply_native_frame(self):
+        """窗口真正建好之后，再补 WS_THICKFRAME（提前改样式会让 CreateWindowEx 失败）。"""
+        if getattr(self, "_native_frame", False):
+            return
+        if not _install_native_frame(self):
+            return
+        self._native_frame = True
+        for e in getattr(self, "_edges", []):
+            try:
+                e.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+                e.hide()
+            except Exception:                    # noqa: BLE001
+                pass
+
+    def _place_edges(self):
+        lst = getattr(self, "_edges", None)
+        if not lst:
+            return
+        if getattr(self, "_native_frame", False):
+            # 系统接管了边缘缩放，自绘热区全部收起来，别和原生 NC 命中打架
+            for e in lst:
+                if e.isVisible():
+                    e.hide()
+            return
+        b, c = 6, 10
+        w, h = self.width(), self.height()
+        boxes = [(0, 0, b, h), (w - b, 0, b, h), (0, 0, w, b), (0, h - b, w, b),
+                 (0, 0, c, c), (w - c, 0, c, c), (0, h - c, c, c), (w - c, h - c, c, c)]
+        for edge, box in zip(lst, boxes):
+            edge.setGeometry(*box)
+            edge.raise_()
+            edge.setVisible(_FRAMELESS)
 
     def _settle_cards(self):
         """卡片里的内容首帧还没量准高度，重新报一次，
@@ -768,6 +1526,8 @@ class MainWindow(QMainWindow):
         st.bar_font = self.cb_font.currentText()
         st.bar_font_size = int(self.field_size.value())     # 留空 = 0 = 自动
         st.bar_margin = int(self.field_margin.value())       # 留空 = 0 = 自动
+        _tg = getattr(self, "field_tgap", None)
+        st.bar_text_offset = int(_tg.value()) if _tg is not None else 0
         st.export_zoom = [1, 2, 4][self.cb_zoom.currentIndex()]
         st.bar_extra_png = self.chk_bar_png.isChecked()
         st.exp_merge = self.chk_merge.isChecked()
@@ -786,8 +1546,8 @@ class MainWindow(QMainWindow):
         st.z_pick = self.ed_zpick.text()
         st.out_dir = self.ed_outdir.text()
         st.group_sync = self.chk_sync.isChecked()
-        st.ui_left = self.btn_left.isChecked()
-        st.ui_right = self.btn_right.isChecked()
+        st.ui_left = self.left_holder.isVisible()
+        st.ui_right = not getattr(self, "_right_collapsed", False)
         st.show_box = not self.btn_hide_box.isChecked()
         return st
 
@@ -796,8 +1556,11 @@ class MainWindow(QMainWindow):
         self._mark_dirty()               # 参数变了也要自动保存（不进撤销栈）
         self.refresh_manifest()
         self._sync_pills()
-        if self.view_mode == "crop":
+        self._switching = True               # 这一轮走异步，改数值不卡
+        try:
             self.refresh_preview()
+        finally:
+            self._switching = False
 
     def on_crop_changed(self, *_args):
         self._commit("改裁剪视野尺寸", coalesce=1.2)   # 连点/连续改只记一次
@@ -817,8 +1580,11 @@ class MainWindow(QMainWindow):
             self.canvas.set_lock(self.chk_lock.isChecked())
             self.canvas.set_box(box)
         self.refresh_manifest()
-        if self.view_mode == "crop":
+        self._switching = True               # 这一轮走异步，改数值不卡
+        try:
             self.refresh_preview()
+        finally:
+            self._switching = False
 
     def on_lock_toggled(self, on):
         self.canvas.set_lock(on)
@@ -951,9 +1717,11 @@ class MainWindow(QMainWindow):
             self.cb_pos.setCurrentIndex(4)
             self.cb_pos.blockSignals(False)
         self._sync_settings()
+        self._fast = True                    # 拖动期间后台渲染，跟手
         self.refresh_preview()
 
     def on_bar_drag_done(self):
+        self._fast = False
         """标尺拖完了：下一次拖动重新记一份快照。"""
         self._bar_drag_seen = False
 
@@ -1008,7 +1776,7 @@ class MainWindow(QMainWindow):
         self.import_paths([u.toLocalFile() for u in ev.mimeData().urls()])
 
     def import_folder(self):
-        start = paths.ROOT
+        start = "E:\\XY" if os.path.isdir("E:\\XY") else paths.ROOT
         d = QFileDialog.getExistingDirectory(self, "选择采集目录（可含子目录）", start)
         if d:
             self.import_paths([d])
@@ -1018,8 +1786,7 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         act_dir = menu.addAction("导入文件夹（含子目录）")
         act_file = menu.addAction("导入单个 / 多个文件…")
-        pos = self.btn_import.mapToGlobal(self.btn_import.rect().bottomLeft())
-        chosen = menu.exec(pos)
+        chosen = menu.exec(QCursor.pos())
         if chosen is act_dir:
             self.import_folder()
         elif chosen is act_file:
@@ -1027,7 +1794,7 @@ class MainWindow(QMainWindow):
 
     def import_files(self):
         files, _ = QFileDialog.getOpenFileNames(
-            self, "选择图像", paths.ROOT,
+            self, "选择图像", "E:\\XY",
             "科研图像 (*.oib *.oif *.czi *.lif *.lof *.xlif *.xlef *.xlcf "
             "*.tif *.tiff *.png *.jpg *.jpeg *.bmp);;所有文件 (*.*)")
         if files:
@@ -1072,6 +1839,7 @@ class MainWindow(QMainWindow):
         self.refresh_strip()
         self.refresh_manifest()
         self._mark_dirty()
+        self._auto_show_after_import()
         self.lbl_status.setText("已拼好：%s" % item.name)
 
     def _run(self, worker, on_done):
@@ -1112,6 +1880,28 @@ class MainWindow(QMainWindow):
                                 % (len(added), len(self.items), len(self.groups)))
         self._mark_dirty()
         self.start_thumbnails()
+        self._auto_show_after_import()
+
+    def _auto_show_after_import(self):
+        """导入后自动展开分组面板，并打开第一组第一张（2026-11-03）。"""
+        if not getattr(self, "groups", None):
+            return
+        # ① 面板总是展开 —— 用户要的是「导入完就能看见分组」，不是再点一下
+        panel = getattr(self, "group_panel", None)
+        if panel is not None and not panel.isVisible():
+            self._rail["group"].setChecked(True)
+            panel.setVisible(True)
+            if hasattr(self, "left_col"):
+                self.left_col.setStretch(self._left_stretch, 0)
+            if hasattr(self, "left_holder"):
+                self.left_holder.updateGeometry()
+        # ② 已经有选中（追加导入）就不动用户的位置
+        if self.cur_group is not None and self.cur_item is not None:
+            return
+        g = self.groups[0]
+        self.select_group(g.gid)
+        if self.cur_item is None and getattr(g, "images", None):
+            self.select_item(g.images[0].path)
 
     def _regroup(self):
         """重新分组。
@@ -1218,6 +2008,9 @@ class MainWindow(QMainWindow):
                 w.setParent(None)
                 w.deleteLater()
         self._group_cards = {}
+        hint = getattr(self, "lbl_empty_hint", None)
+        if hint is not None:
+            hint.setVisible(not self.groups)
         for g in self.groups:
             gc = GroupCard(g)
             gc.clicked.connect(self.select_group)
@@ -1228,7 +2021,7 @@ class MainWindow(QMainWindow):
         n_oib = sum(1 for it in self.items if "内嵌" in it.calib)
         n_bar = sum(1 for it in self.items if "标尺" in it.calib)
         n_man = sum(1 for it in self.items if "手动" in it.calib)
-        self.lbl_src.setText("文件自带标定 %d · 标尺识别 %d · 手动 %d" % (n_oib, n_bar, n_man))
+        self.lbl_src.setText("自带%d · 识别%d\n手动%d" % (n_oib, n_bar, n_man))
 
     def select_group(self, gid):
         for g in self.groups:
@@ -1280,6 +2073,7 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ 中栏
     def refresh_strip(self):
+        """组内图片列表：一行一个文件名，点一下切到那张。"""
         while self.strip_layout.count() > 1:
             item = self.strip_layout.takeAt(0)
             w = item.widget()
@@ -1290,21 +2084,12 @@ class MainWindow(QMainWindow):
         if not self.cur_group:
             return
         for it in self.cur_group.images:
-            tb = ThumbButton(it)
-            tb.clicked.connect(self.select_item)
-            tb.menu_requested.connect(self.thumb_menu)
-            tb.set_active(bool(self.cur_item and it.path == self.cur_item.path))
-            # 缩略图按"通道名/配色/显示区间"算缓存 key。改了通道（比如重新探测元数据后
-            # 从"绿+红"变回"只有绿"）缓存 key 就变了 —— 这里按**当前**通道重算一次路径，
-            # 别再拿 `_thumbs` 里那个旧文件（否则条带里一直显示旧样子，实测反馈过）。
-            want = loader.thumb_path(it, 256)
-            if os.path.exists(want):
-                self._thumbs[it.path] = want
-                tb.set_thumb(want)
-            else:
-                self._thumbs.pop(it.path, None)     # 旧 key 的缩略图作废，等重出
-            self.strip_layout.insertWidget(self.strip_layout.count() - 1, tb)
-            self._thumb_buttons[it.path] = tb
+            row = FileRow(it)
+            row.clicked.connect(lambda _c=False, p=it.path: self.select_item(p))
+            row.menu_requested.connect(self.thumb_menu)
+            row.set_active(bool(self.cur_item and it.path == self.cur_item.path))
+            self.strip_layout.insertWidget(self.strip_layout.count() - 1, row)
+            self._thumb_buttons[it.path] = row
 
     def select_item(self, path):
         it = next((x for x in self.items if x.path == path), None)
@@ -1317,6 +2102,7 @@ class MainWindow(QMainWindow):
             self.cur_group.boxes.setdefault(path, dict(self.cur_group.box))
         for p, tb in getattr(self, "_thumb_buttons", {}).items():
             tb.set_active(p == path)
+        self._switching = True          # 这一轮预览走后台线程，点击不卡
         self._sync_frame_ui()
         self.refresh_channels()
         self._sync_proj_tool()
@@ -1326,6 +2112,7 @@ class MainWindow(QMainWindow):
         self.refresh_preview()
         self._settle_channels(it)      # 解码后 loader 可能刚合并/隐藏了通道，补刷通道卡
         self.refresh_manifest()
+        self._switching = False
 
     def _sync_frame_ui(self):
         """把 Z / T 两条滑条和标签对齐到当前图（P0-3 3.18.4）。"""
@@ -1360,6 +2147,81 @@ class MainWindow(QMainWindow):
         if show:
             self.btn_declare.setText("多帧 = Z 栈" if zc <= 1 else "多帧 = 时间序列")
         self._sync_proj_tool()          # Z 滑条动了，「当前层 ± n」的提示要跟着变
+
+    def _preview_frame_label(self, value):
+        """拖动中只改读数，不换帧 —— 换一帧要 50ms，会把拖尾动画卡住。"""
+        it = self.cur_item
+        if it is None:
+            return
+        tc = max(1, int(it.t_count or 1))
+        iv = ("间隔 %.3g s" % it.t_interval_s) if it.t_interval_s > 0 else "间隔未知"
+        tot = (" · 共 %.3g s" % ((tc - 1) * it.t_interval_s)) if it.t_interval_s > 0 else ""
+        self.lbl_frame.setText("第 %d/%d 点 · %s%s" % (int(value), tc, iv, tot))
+
+    # ---- 自动播放
+    PLAY_SPEEDS = (0.25, 0.5, 1.0, 2.0, 3.0)
+
+    def _cur_speed(self):
+        i = max(0, min(len(self.PLAY_SPEEDS) - 1, self.cb_speed.currentIndex()))
+        return self.PLAY_SPEEDS[i]
+
+    def _play_interval(self):
+        """1x = 4 秒放 50 张 → 80ms 一帧；倍率越大越快。"""
+        i = max(0, min(len(self.PLAY_SPEEDS) - 1, self.cb_speed.currentIndex()))
+        spd = self.PLAY_SPEEDS[i]
+        return max(16, int(round(4000.0 / 50.0 / spd)))
+
+    def _restart_play(self, *_):
+        # 换速度时立刻按新间隔重排；同时把“上一帧渲染耗时”清零，避免旧值把速度压住
+        self._render_ms = 0.0
+        if self._play_timer.isActive():
+            self._play_timer.start(self._play_interval())
+
+    def on_play_toggled(self, on):
+        it = self.cur_item
+        if not on or it is None or int(it.t_count or 1) <= 1:
+            self._play_timer.stop()
+            self._fast = False
+            return
+        self._fast = True
+        self._play_reset_async()          # 开始播放前清掉上一次挂起的后台任务
+        self._play_timer.setTimerType(Qt.PreciseTimer)
+        iv = self._play_interval()
+        self._play_timer.start(iv)
+        self.lbl_status.setText("自动播放：%s 倍率（%.0f 帧/秒）"
+                                % (self.cb_speed.currentText(), 1000.0 / iv))
+
+    def _play_reset_async(self):
+        self._prev_busy = False
+        self._prev_pending = None
+
+    def eventFilter(self, obj, ev):              # noqa: N802
+        # 倍率下拉打开时冻结推帧：弹出框不再和渲染抢 UI 线程
+        if obj is getattr(getattr(self, "cb_speed", None), "view", lambda: None)():
+            if ev.type() == QEvent.Show:
+                self._popup_open = True
+            elif ev.type() == QEvent.Hide:
+                self._popup_open = False
+        return super().eventFilter(obj, ev)
+
+    def _play_step(self):
+        it = self.cur_item
+        if getattr(self, "_popup_open", False):
+            return                               # 选倍率时不推帧
+        if it is None or int(it.t_count or 1) <= 1:
+            self._play_timer.stop()
+            self.btn_play.setChecked(False)
+            return
+        n = int(it.t_count)
+        nxt = (self.cur_t + 1) % n
+        t0 = time.perf_counter()
+        self.frame_slider.setValue(nxt + 1)
+        self._render_ms = (time.perf_counter() - t0) * 1000.0
+        # 落后就丢帧（由适配器决定实际间隔），绝不在播放线程里同步渲染
+        # 丢帧优先于排队：渲染一旦比播放间隔还慢，就放慢定时器，别让事件队列越积越多
+        need = int(max(self._play_interval(), self._render_ms * 1.15))
+        if abs(self._play_timer.interval() - need) > 4:
+            self._play_timer.setInterval(max(16, need))
 
     def on_z_changed(self, value):
         it = self.cur_item
@@ -1456,7 +2318,7 @@ class MainWindow(QMainWindow):
         it.proj_center = self.cur_z
         self._sync_proj_tool()
         self._sync_frame_ui()
-        if self.view_mode == "crop":
+        if it.proj_mode != "none":
             self.refresh_preview()
         else:
             self._planes_key = None        # 投影结果不是同一份像素 → 强制重算
@@ -2264,8 +3126,11 @@ class MainWindow(QMainWindow):
     def on_box_committed(self):
         self._mark_dirty()                 # 快照在 on_box_drag_started 里取过了
         self.on_box_changed()
-        if self.view_mode == "crop":
+        self._switching = True               # 这一轮走异步，改数值不卡
+        try:
             self.refresh_preview()
+        finally:
+            self._switching = False
 
     def on_box_drag_started(self):
         """按下的瞬间记一份裁剪框快照 —— 等松手再记就成"改之后"了。"""
@@ -2512,6 +3377,9 @@ class MainWindow(QMainWindow):
             return
         try:
             if self.view_mode == "full":
+                if (self._fast or self._switching) and self._async_ok and self._preview_async(it):
+                    self._update_px_label()
+                    return
                 self._preview_full(it)
             else:
                 self._preview_crop(it)
@@ -2519,6 +3387,115 @@ class MainWindow(QMainWindow):
             traceback.print_exc()
             self.lbl_status.setText("预览出错：%s" % exc)
         self._update_px_label()
+
+    # ------------------------------------------------------------ 快速模式（播放 / 拖动）
+    def _async_stuck(self, limit=2.5):
+        """后台渲染卡住了吗？卡住就意味着画面再也不会更新（播放时表现为「不滚动」）。"""
+        if not self._prev_busy:
+            return False
+        t0 = getattr(self, "_prev_t0", 0.0)
+        return (time.perf_counter() - t0) > limit
+
+    def _preview_async(self, it):
+        """把重采样 + 合成 + 锐化（实测 ~40ms）丢到后台线程；同一时刻只跑一个，最新的覆盖旧的。"""
+        try:
+            dpr = float(self.canvas.devicePixelRatioF() or 1.0)
+            tw = max(64, int(round(self.canvas.width() * dpr)))
+            th = max(64, int(round(self.canvas.height() * dpr)))
+            if self._fast:                      # 播放 / 拖动：先出低分辨率，停下再补清晰版
+                scale = 0.7
+                if self._play_timer.isActive():  # 倍率越高，分辨率越低（停下会自动补清晰）
+                    spd = self._cur_speed()
+                    scale = 0.7 if spd <= 1.0 else (0.5 if spd <= 2.0 else 0.38)
+                dpr = dpr * scale
+                tw = max(64, int(round(tw * scale)))
+                th = max(64, int(round(th * scale)))
+            rect = tuple(round(v, 6) for v in self.canvas.visible_rect_norm())
+            field_w = it.field_um() or float(it.width)
+            field_h = (it.height * it.umpp) if it.umpp > 0 else field_w
+        except Exception:                       # noqa: BLE001
+            return False
+        if self._async_stuck():
+            # 上一次后台渲染没回来：丢掉它，别让队列永远堵着
+            self._prev_busy = False
+            self._prev_pending = None
+        spec = {"item": it, "frame": self.frame, "rect": rect, "tw": tw, "th": th,
+                "dpr": dpr, "field_w": field_w, "field_h": field_h,
+                "merge": getattr(self.settings, "merge_mode", "add")}
+        self._prev_gen += 1
+        self._prev_pending = (self._prev_gen, spec)
+        if not self._prev_busy:
+            self._start_preview_job()
+        return True
+
+    def _start_preview_job(self):
+        if self._prev_pending is None:
+            return
+        gen, spec = self._prev_pending
+        self._prev_pending = None
+        self._prev_busy = True
+        self._prev_t0 = time.perf_counter()
+        self._pending_frame = spec["frame"]
+        sig = self._preview_signals
+
+        def work():
+            item = render.view_item(spec["item"], spec["frame"])
+            frame = 0 if item is not spec["item"] else spec["frame"]
+            planes, used = render.preview_for_view(item, frame, spec["rect"],
+                                                   (spec["tw"], spec["th"]))
+            rgb = render.compose(planes, item.channels,
+                                 render.ranges_for(item, frame), mode=spec["merge"])
+            shrink = (used[2] - used[0]) * item.width / float(max(1, spec["tw"]))
+            if shrink >= 1.6:
+                rgb = render.sharpen_display(rgb)
+            return (gen, rgb, used, spec)
+
+        class _Job(QRunnable):
+            def run(self):
+                try:
+                    res = work()
+                except Exception as exc:        # noqa: BLE001
+                    res = exc
+                try:
+                    sig.done.emit(res)
+                except Exception:               # noqa: BLE001
+                    pass
+
+        self._preview_pool.start(_Job())
+
+    def _on_preview_done(self, res):
+        self._prev_busy = False
+        if isinstance(res, Exception):
+            # 后台出错：退回同步渲染，绝不把界面留在旧帧上
+            self._fast = False
+            self.refresh_preview()
+            return
+        gen, rgb, used, spec = res
+        # 图在后台渲染期间被删掉 / 被切走：结果作废，绝不能把已删除的图画回来
+        if self.cur_item is None or spec.get("item") is not self.cur_item:
+            if self._prev_pending is not None:
+                self._start_preview_job()
+            return
+        if gen != self._prev_gen:               # 有更新的一帧在路上，丢掉这一张
+            if self._prev_pending is not None:
+                self._start_preview_job()
+            return
+        try:
+            self._used_rect = used
+            self.canvas.set_field(spec["field_w"], spec["field_h"])
+            self.canvas.set_show_box(bool(getattr(self.settings, "show_box", True)))
+            self.canvas.set_lock(self.chk_lock.isChecked())
+            self.canvas.set_pix_um(used[0] * spec["field_w"], used[1] * spec["field_h"],
+                                   (used[2] - used[0]) * spec["field_w"],
+                                   (used[3] - used[1]) * spec["field_h"])
+            self.canvas.set_overlay(None)
+            self.canvas.clear_bar_zones()
+            self.canvas.set_image(rgb, spec["dpr"])
+            self._drawn_frame = spec["frame"]
+        except Exception:                       # noqa: BLE001
+            pass
+        if self._prev_pending is not None:
+            self._start_preview_job()
 
     def _preview_full(self, it):
         """原图显示：按可见范围一次性重采样，保证清晰。"""
@@ -2844,6 +3821,37 @@ class MainWindow(QMainWindow):
         if it is not None and n:
             self._mark_dirty()
 
+    def _channel_hist(self, ch, top, bins=92):
+        """当前图 / 当前帧 / 这个通道的真实像素分布，对数归一化到 0..1。"""
+        it = self.cur_item
+        if it is None:
+            return None
+        cache = getattr(self, "_hist_cache", None)
+        if cache is None:
+            cache = self._hist_cache = {}
+        key = (it.path, int(self.frame), int(getattr(ch, "index", 0)), int(top), bins)
+        if key in cache:
+            return cache[key]
+        try:
+            stack = loader.load_stack(it)            # (t, c, h, w)
+            idx = min(int(getattr(ch, "index", 0)), stack.shape[1] - 1)
+            fr = min(int(self.frame), stack.shape[0] - 1)
+            plane = stack[fr][idx]
+            flat = plane.reshape(-1)[::4]
+            scale = bins / float(max(1, top + 1))
+            idxs = np.minimum((flat.astype(np.float64) * scale).astype(np.int32), bins - 1)
+            counts = np.bincount(idxs, minlength=bins).astype(np.float64)
+            nz = counts[counts > 0]
+            p99 = float(np.percentile(nz, 99)) if nz.size else 1.0
+            denom = np.log1p(max(1.0, p99))
+            out = [float(min(1.0, np.log1p(c) / denom)) for c in counts]
+            if len(cache) > 60:
+                cache.clear()
+            cache[key] = out
+            return out
+        except Exception:                             # noqa: BLE001
+            return None
+
     def _chan_row(self, ch):
         f = QFrame()
         f.setObjectName("chan")
@@ -2883,10 +3891,12 @@ class MainWindow(QMainWindow):
         top.addWidget(sw)
         lay.addLayout(top)
         # 第二行：双端滑条（左黑右白）
-        slider = RangeSlider()
         vmax = int(ch.vmax or max(ch.white, 255) or 255)
-        slider.setRange(0, max(16, int(vmax * 1.05)))
+        top = max(16, int(vmax * 1.05))
+        slider = LevelSlider(color='rgb(%d,%d,%d)' % tuple(int(v) for v in ch.color))
+        slider.setRange(0, top)
         slider.setValues(ch.black, ch.white)
+        slider.setHistogram(self._channel_hist(ch, top))
         slider.valuesChanged.connect(lambda lo, hi, c=ch: self.on_channel_slider(c, lo, hi))
         lay.addWidget(slider)
         # 第三行：黑 …… 白
@@ -3205,10 +4215,15 @@ class MainWindow(QMainWindow):
                                             if it.t_interval_s > 0 else ""))
             if not dims and it.frames > 1:
                 dims.append("%d 帧" % it.frames)
-            self.lbl_group_info.setText(
-                "%s µm/px · %d×%d · %d 通道%s"
-                % (("%g" % round(um, 4)) if um else "未标定", it.width, it.height,
-                   len(it.channels), (" · " + " · ".join(dims)) if dims else ""))
+            # 自动组名里已经有「µm/px · 宽×高」，这里只补剩下的，避免同一行重复
+            auto = not getattr(self.cur_group, "title_manual", False)
+            tail = ["%d 通道" % len(it.channels)] + dims
+            if auto:
+                self.lbl_group_info.setText(" · ".join(tail))
+            else:
+                head = ("%g" % round(um, 4)) if um else "未标定"
+                self.lbl_group_info.setText(
+                    "%s µm/px · %d×%d · %s" % (head, it.width, it.height, " · ".join(tail)))
         if it.umpp > 0:
             self.lbl_calib.setText("%s\n%g µm/px · %s\n视野 %.1f µm · %d×%d px"
                                    % (it.name, round(it.umpp, 5), it.calib, it.field_um(),
@@ -3511,9 +4526,13 @@ class MainWindow(QMainWindow):
         self.progress.setValue(100)
         self.lbl_status.setText("导出完成：%d 张 → %d 个文件" % (ok, files))
         out_root = self.settings.out_dir or paths.OUTPUT_DIR
-        QMessageBox.information(self, "导出完成",
-                                "共处理 %d 张，写出 %d 个文件。\n输出目录：%s"
-                                % (ok, files, out_root))
+        # 导出清单原来显示在底部那行，现在并进这个完成提醒
+        manifest = self.manifest.text() if self.manifest.text().startswith("导出清单") else ""
+        body = "共处理 %d 张，写出 %d 个文件。" % (ok, files)
+        if manifest:
+            body += "\n\n" + manifest
+        body += "\n输出目录：%s" % out_root
+        QMessageBox.information(self, "导出完成", body)
 
     # ------------------------------------------------------------ 工程文件 / 撤销
     @staticmethod
@@ -3577,6 +4596,12 @@ class MainWindow(QMainWindow):
         nm = os.path.basename(self._proj_path) if self._proj_path else "未命名"
         self.setWindowTitle("Image capture — %s%s · %s"
                             % (nm, " *" if self._dirty else "", APP_VERSION))
+        lab = getattr(self, "lbl_title_doc", None)
+        if lab is not None:
+            txt = "" if nm == "未命名" else nm
+            if self._dirty:
+                txt = (txt + " ·") if txt else "未保存"
+            lab.setText(txt)
 
     def _update_undo_buttons(self):
         u, r = self._undo.names()
@@ -3695,7 +4720,19 @@ class MainWindow(QMainWindow):
         a_redetect.setToolTip("重读一遍所有下机文件的标定 / 尺寸 / 帧数（大图会慢）")
         a_restore = menu.addAction("恢复上次自动保存")
         a_restore.setEnabled(os.path.exists(paths.AUTOSAVE_FILE))
-        chosen = menu.exec(self.btn_proj.mapToGlobal(self.btn_proj.rect().bottomLeft()))
+        anchor = getattr(self, "_rail_settings", None)
+        hint = menu.sizeHint()
+        if anchor is not None:
+            # 贴着「设置」按钮右上方弹出（设置在最底部，所以往上开）
+            pos = anchor.mapToGlobal(QPoint(anchor.width() + 6, anchor.height()))
+            pos = QPoint(pos.x(), pos.y() - hint.height())
+        else:
+            pos = self.mapToGlobal(QPoint(self.width() - 240, 60))
+        tl = self.mapToGlobal(QPoint(0, 0))
+        br = self.mapToGlobal(QPoint(self.width(), self.height()))
+        x = min(max(pos.x(), tl.x() + 8), br.x() - hint.width() - 8)
+        y = min(max(pos.y(), tl.y() + 8), br.y() - hint.height() - 8)
+        chosen = menu.exec(QPoint(x, y))
         if chosen is None:
             return
         if chosen is a_new:
@@ -3749,9 +4786,7 @@ class MainWindow(QMainWindow):
             self._restoring = False
         self.refresh_groups()
         self.refresh_strip()
-        self.refresh_channels()
-        self.refresh_preview()
-        self.refresh_manifest()
+        self._clear_view()
         self._update_title()
         self._update_undo_buttons()
         self.lbl_status.setText("新建工程：空白工作区")
@@ -3910,6 +4945,11 @@ class MainWindow(QMainWindow):
             return False
 
     def _check_autosave(self):
+        # 窗口还没真正显示出来时不要弹模态框：那种情况下 Qt 有时会创建一个
+        # 不可见的顶层窗口，主循环被它卡住，用户看到的就是「双击没反应」。
+        if not self.isVisible() or self.windowHandle() is None:
+            QTimer.singleShot(400, self._check_autosave)
+            return
         if self._no_save() or not os.path.exists(paths.AUTOSAVE_FILE):
             return
         try:
@@ -3923,10 +4963,21 @@ class MainWindow(QMainWindow):
                                  time.localtime(os.path.getmtime(paths.AUTOSAVE_FILE)))
         except Exception:                       # noqa: BLE001
             return
-        ans = QMessageBox.question(self, "上次没正常退出",
-                                   "发现一份自动保存的工作（%s）。要载入它吗？" % when)
-        if ans == QMessageBox.Yes:
-            self.restore_autosave()
+        box = QMessageBox(self)
+        box.setWindowTitle("上次没正常退出")
+        box.setText("发现一份自动保存的工作（%s）。要载入它吗？" % when)
+        box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        box.setDefaultButton(QMessageBox.No)
+        box.setWindowModality(Qt.ApplicationModal)
+        box.setAttribute(Qt.WA_DeleteOnClose, True)
+
+        def _done(result):
+            if result == QMessageBox.Yes:
+                self.restore_autosave()
+
+        box.finished.connect(_done)
+        box.show()
+        box.raise_()
 
     def restore_autosave(self):
         if not os.path.exists(paths.AUTOSAVE_FILE):
@@ -4018,9 +5069,37 @@ class MainWindow(QMainWindow):
         self._thumbs.clear()
         self.refresh_groups()
         self.refresh_strip()
-        self.refresh_preview()
+        self._clear_view()
         self.refresh_manifest()
         self.lbl_status.setText("列表已清空")
+
+    def _clear_view(self):
+        """把界面清成「还没有图片」的状态（删掉最后一张、新建工程都会走这里）。"""
+        self._prev_gen += 1                     # 让在路上的后台预览全部作废
+        self._prev_pending = None
+        self._planes_key = None
+        self._base_key = None
+        self._used_rect = None
+        self.cur_item = None
+        self.cur_group = None
+        self.lbl_group_head.setText("还没有导入图片")
+        self.lbl_group_info.setText("")
+        self.lbl_px.setText("")
+        self.lbl_size.setText("—")
+        try:
+            self.canvas.set_show_box(False)
+            self.canvas.set_detect(None)
+            self.canvas.clear_bar_zones()
+            self.canvas.set_overlay(None)
+            self.canvas.set_image(np.zeros((8, 8, 3), np.uint8))
+        except Exception:                       # noqa: BLE001
+            pass
+        for fn in ("refresh_channels", "refresh_rois", "refresh_manifest",
+                   "_sync_frame_ui", "refresh_calib"):
+            try:
+                getattr(self, fn)()
+            except Exception:                   # noqa: BLE001
+                pass
 
     def remove_item(self, item):
         if item is None:
@@ -4042,10 +5121,7 @@ class MainWindow(QMainWindow):
         if live is not None:
             self.select_group(live.gid)
         else:
-            self.cur_group = None
-            self.cur_item = None
-            self.refresh_preview()
-            self.refresh_channels()
+            self._clear_view()
         self.refresh_manifest()
         self.lbl_status.setText("已移出：%s（原文件没动）" % name)
 
@@ -4125,7 +5201,7 @@ class MainWindow(QMainWindow):
                                 if getattr(item, "embed_ok", False) else
                                 "这个文件只记录了处理步骤，没有内嵌原始数据，还原不了")
         menu.addSeparator()
-        act_del = menu.addAction("从列表移出（不动原文件）")
+        act_del = menu.addAction("删除（移出列表，不动原文件）")
         act_open = menu.addAction("打开所在文件夹")
         act_copy = menu.addAction("复制文件路径")
         chosen = menu.exec(pos)

@@ -7,11 +7,11 @@ from PySide6.QtCore import QEasingCurve, QPointF, QRectF, QSize, Qt, QVariantAni
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath
 from PySide6.QtWidgets import QPushButton
 
-BG = QColor("#5B5BD6")
+BG = QColor("#A8642A")
 INNER = QColor(74, 74, 194, 110)          # inset 阴影用的深靛蓝
 ICON_BG = QColor("#ffffff")
-ICON_INK = QColor("#5B5BD6")
-ICON_SHADOW = QColor(91, 91, 214)
+ICON_INK = QColor("#A8642A")
+ICON_SHADOW = QColor(168, 100, 42)
 TEXT = QColor("#ffffff")
 
 EM = 14.0                                 # 对应 CSS 的 1em（font-size）

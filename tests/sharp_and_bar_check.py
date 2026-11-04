@@ -18,11 +18,10 @@ import paths                                                    # noqa: E402
 from core import loader, render                                 # noqa: E402
 from core.model import Group, Settings                          # noqa: E402
 from ui.main_window import MainWindow                           # noqa: E402
-from _samples import P  # noqa: E402
 
 OUT = os.path.join(paths.OUTPUT_DIR, "_自检")
-SRC = P(r"E:\XY\亚细胞定位部\4gegene\2\3164p.oib")
-CZI = os.environ.get("IMAGECAPTURE_CZI", "")
+SRC = r"E:\XY\亚细胞定位部\4gegene\2\3164p.oib"
+CZI = r"C:\Users\王卓\Desktop\01831+oec33-7+.czi"
 
 
 def sharpness(rgb):

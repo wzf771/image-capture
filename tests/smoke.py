@@ -16,9 +16,8 @@ import paths                                           # noqa: E402
 from core import bar as bar_mod                        # noqa: E402
 from core import loader, render                        # noqa: E402
 from core.model import Group, Settings, nice_bar_length  # noqa: E402
-from _samples import P  # noqa: E402
 
-DATA = P(r"E:\XY\亚细胞定位部\4gegene\2")
+DATA = r"E:\XY\亚细胞定位部\4gegene\2"
 OUT = os.path.join(paths.OUTPUT_DIR, "_自检")
 
 
@@ -41,8 +40,8 @@ def main():
 
     # 2) 读导出图并靠标尺识别标定
     png = None
-    for cand in (P(r"E:\XY\3164p.bmp.frames\3164p_T001.bmp"),
-                 P(r"E:\XY\ER1.bmp.frames\ER1_T001.bmp")):
+    for cand in (r"E:\XY\3164p.bmp.frames\3164p_T001.bmp",
+                 r"E:\XY\ER1.bmp.frames\ER1_T001.bmp"):
         if os.path.exists(cand):
             png = cand
             break
@@ -102,7 +101,7 @@ def main():
     print("[4] 合并 + 指定单通道 →", [os.path.basename(f) for f in files])
 
     # 5) 时间序列
-    frap = P(r"E:\XY\相分离部\6.3\6.3\frap\3-6\FRAPR1.oib")
+    frap = r"E:\XY\相分离部\6.3\6.3\frap\3-6\FRAPR1.oib"
     if os.path.exists(frap):
         it3 = loader.probe(frap)
         stk = loader.load_stack(it3)

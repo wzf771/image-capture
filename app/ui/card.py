@@ -50,25 +50,12 @@ class CardFrame(QFrame):
         self.update()
 
     def _set_shadow(self, kind):
-        if kind == self._kind:
-            return
+        """2026-11-02 扁平化：卡片不再投影（阴影是"割裂感"的主要来源）。
+        保留方法签名，调用方不用改。"""
         if self._shadow is not None:
             self.setGraphicsEffect(None)
             self._shadow = None
-        self._kind = kind
-        if kind is None:
-            return
-        eff = QGraphicsDropShadowEffect(self)
-        if kind == "soft":                       # box-shadow: 0 2px 5px rgba(0,0,0,.1)
-            eff.setBlurRadius(8)
-            eff.setOffset(0, 2)
-            eff.setColor(QColor(0, 0, 0, 32))
-        else:
-            eff.setBlurRadius(18)
-            eff.setOffset(0, 4)
-            eff.setColor(QColor(0, 0, 0, 60))
-        self._shadow = eff
-        self.setGraphicsEffect(eff)
+        self._kind = None
 
     def apply_state(self, expanded, hovering=False):
         self._profile = "hover" if expanded else "soft"
@@ -253,9 +240,10 @@ def card(title, hint="", collapsible=True, header_widget=None, module=False):
     lay = QVBoxLayout(body)
     if module:
         lay.setContentsMargins(12, 8, 12, 12)
+        lay.setSpacing(10)          # 与表单内部 4px 间距配套，行与行之间统一 10px
     else:
         lay.setContentsMargins(0, 0, 0, 0)
-    lay.setSpacing(6)
+        lay.setSpacing(6)
     holder = SlideHolder(body)               # 收缩时只裁剪，不压缩里面的内容
     outer.addWidget(holder)
     box.body = lay

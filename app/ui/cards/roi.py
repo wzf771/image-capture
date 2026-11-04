@@ -9,7 +9,7 @@ from __future__ import annotations
 from PySide6.QtWidgets import (QHBoxLayout, QLabel, QSpinBox, QVBoxLayout, QWidget)
 
 from ui.card import card
-from ui.cards._helpers import pair
+from ui.cards._helpers import button_grid, cell, pair, two_col
 from ui.widgets import BrutalButton
 
 
@@ -34,7 +34,7 @@ def build(win):
         b.clicked.connect(lambda _ck=False, k=kind: win.on_roi_tool(k))
         win._roi_tool_buttons[kind] = b
         tools.addWidget(b)
-    lay.addLayout(tools)
+    lay.addWidget(button_grid([b for b in win._roi_tool_buttons.values()], cols=4))
     # 2026-09-28：右栏不再一个个列 ROI（用户要求），改成图上右键编辑 —— 这里不再建列表
     # 线剖面宽度（垂直 ±n 像素平均，抗噪）与粒子面积下限
     win.sp_prof_w = QSpinBox()
@@ -42,13 +42,15 @@ def build(win):
     win.sp_prof_w.setRange(0, 8)
     win.sp_prof_w.setValue(0)
     win.sp_prof_w.setToolTip("线剖面宽度：沿线两侧各取 n 像素平均（0 = 只取线本身）")
-    lay.addLayout(pair("剖面宽度 ±n", win.sp_prof_w))
+
     win.sp_particle_min = QSpinBox()
     win.sp_particle_min.setObjectName("field")
     win.sp_particle_min.setRange(1, 100000)
     win.sp_particle_min.setValue(4)
     win.sp_particle_min.setToolTip("粒子面积下限（像素）：小于它的当噪点丢掉")
-    lay.addLayout(pair("粒子面积下限", win.sp_particle_min))
+    lay.addWidget(two_col(win.sp_prof_w, win.sp_particle_min,
+                          "剖面宽度 ±n", "粒子面积下限"))
+
     # 2026-09-26：原来"测量表/剖面/共定位/粒子"4 个按钮各自弹一个窗，合成一个面板
     for text, slot, tip in (
             ("测量…", lambda: win.roi_measure(),

@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QGridLayout, QHBoxLayout, Q
 import paths
 from core.model import CHANNEL_COLORS, FONTS, color_name
 from ui.card import ClickLabel, card
-from ui.cards._helpers import cap, pair, plab, stack
+from ui.cards._helpers import button_grid, cap, cell, pair, plab, stack
 from ui.flow import FlowLayout
 from ui.widgets import (BrutalButton, FlipSwitch, FloatField, RangeSlider, RingDot,
                         Switch, ToggleSwitch)
@@ -63,19 +63,15 @@ def build(win):
                                     maximum=100000.0, allow_empty=True,
                                     value=win.settings.__dict__.get("line_um") or None)
     win.field_line_um.setToolTip("先画线，再填这条线代表多少微米，然后点下面两个按钮")
-    ctl.addWidget(win.field_line_um)
+    ctl.addWidget(cell("这条线代表 (µm)", win.field_line_um))
     win.lbl_line = QLabel("还没画线")
     win.lbl_line.setObjectName("muted")
     ctl.addWidget(win.lbl_line)
-    row_line = QHBoxLayout()
-    row_line.setSpacing(6)
     b_g = BrutalButton("应用到本组", compact=True)
     b_g.clicked.connect(lambda: win.apply_line_calib(False))
     b_a = BrutalButton("应用到所有", compact=True)
     b_a.setToolTip("所有图片格式的图都用这个标定（下机文件不动）")
     b_a.clicked.connect(lambda: win.apply_line_calib(True))
-    row_line.addWidget(b_g)
-    row_line.addWidget(b_a)
-    ctl.addLayout(row_line)
+    ctl.addWidget(button_grid([b_g, b_a], cols=2))
     c.body.addWidget(win.cal_tool)
     return c

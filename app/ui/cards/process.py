@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QHBoxLayout, QLabel, Q
                                QVBoxLayout, QWidget)
 
 from ui.card import card
-from ui.cards._helpers import pair, plab
+from ui.cards._helpers import cell, pair, plab, two_col
 from ui.widgets import BrutalButton, FlipSwitch
 
 
@@ -29,7 +29,7 @@ def build(win):
     win.cb_reg_ref = QComboBox()
     win.cb_reg_ref.setObjectName("field")
     win.cb_reg_ref.currentIndexChanged.connect(win.on_proc_changed)
-    lay.addLayout(pair("参考通道", win.cb_reg_ref))
+    lay.addWidget(cell("参考通道", win.cb_reg_ref))
     win.btn_reg_calc = BrutalButton("重新计算位移", compact=True)
     win.btn_reg_calc.clicked.connect(win.recalc_register)
     lay.addWidget(win.btn_reg_calc)
@@ -46,7 +46,7 @@ def build(win):
     win.cb_bg_mode.setObjectName("field")
     win.cb_bg_mode.addItems(["百分位扣除", "常量扣除"])
     win.cb_bg_mode.currentIndexChanged.connect(win.on_proc_changed)
-    lay.addLayout(pair("方法", win.cb_bg_mode))
+    lay.addWidget(cell("方法", win.cb_bg_mode))
     win.sp_bg_p = QDoubleSpinBox()
     win.sp_bg_p.setObjectName("field")
     win.sp_bg_p.setRange(0.1, 99.0)
@@ -54,7 +54,6 @@ def build(win):
     win.sp_bg_p.setValue(5.0)
     win.sp_bg_p.setToolTip("百分位扣除：取这个分位数当背景（共聚焦默认 5%）")
     win.sp_bg_p.valueChanged.connect(win.on_proc_changed)
-    lay.addLayout(pair("百分位", win.sp_bg_p))
     win.sp_bg_c = QDoubleSpinBox()
     win.sp_bg_c.setObjectName("field")
     win.sp_bg_c.setRange(0.0, 65535.0)
@@ -62,7 +61,8 @@ def build(win):
     win.sp_bg_c.setValue(0.0)
     win.sp_bg_c.setToolTip("常量扣除：直接减这个值（有明确暗电流时用）")
     win.sp_bg_c.valueChanged.connect(win.on_proc_changed)
-    lay.addLayout(pair("常量", win.sp_bg_c))
+    lay.addWidget(two_col(win.sp_bg_p, win.sp_bg_c, "百分位", "常量"))
+
 
     # ---- 漂移校正
     win.sw_drift = FlipSwitch()
@@ -73,7 +73,7 @@ def build(win):
     win.sp_drift_ref.setObjectName("field")
     win.sp_drift_ref.setRange(1, 1)
     win.sp_drift_ref.valueChanged.connect(win.on_proc_changed)
-    lay.addLayout(pair("参考帧", win.sp_drift_ref))
+    lay.addWidget(cell("参考帧", win.sp_drift_ref))
     win.btn_drift_calc = BrutalButton("重新计算漂移", compact=True)
     win.btn_drift_calc.clicked.connect(win.recalc_drift)
     lay.addWidget(win.btn_drift_calc)

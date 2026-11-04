@@ -447,7 +447,9 @@ def _bar_layer(W, H, st, lay, rgb_for_color, ss=4):
     # 文字紧贴标尺：间距只跟字号有关，跟刻度线长度无关（刻度在线下方，不影响上方）
     gap = int(st.bar_text_offset or max(2, round(lay["font_size"] * 0.25)))
     t_anchor = getattr(st, "bar_text_anchor", None)
-    if st.bar_position == "custom" and t_anchor:
+    # 只有当「文字距」留空（= 自动）时，才用拖动记录下来的文字锚点。
+    # 填了具体数值就以数值为准 —— 否则拖过标尺之后，这个输入框会完全失效。
+    if st.bar_position == "custom" and t_anchor and not int(getattr(st, "bar_text_offset", 0) or 0):
         tx = float(t_anchor[0]) * W - lay["tw"] / 2.0
         ty = float(t_anchor[1]) * H - lay["th"] / 2.0
     else:

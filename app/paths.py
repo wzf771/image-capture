@@ -9,11 +9,18 @@ r"""集中管理程序用到的路径：全部相对程序目录，整体搬走�
   E:\ImageCapture\logs\      运行日志
 """
 import os
+import sys
 
 APP_NAME = "Image capture"
 
-APP_DIR = os.path.dirname(os.path.abspath(__file__))     # …\ImageCapture\app
-ROOT = os.path.dirname(APP_DIR)                          # …\ImageCapture
+# 打包成 EXE 之后 __file__ 在临时解包目录里，路径必须以 exe 所在位置为根
+FROZEN = bool(getattr(sys, "frozen", False))
+if FROZEN:
+    ROOT = os.path.dirname(os.path.abspath(sys.executable))
+    APP_DIR = ROOT
+else:
+    APP_DIR = os.path.dirname(os.path.abspath(__file__))     # …\ImageCapture\app
+    ROOT = os.path.dirname(APP_DIR)                          # …\ImageCapture
 RUNTIME_DIR = os.path.join(ROOT, "runtime")
 CONFIG_DIR = os.path.join(ROOT, "config")
 CACHE_DIR = os.path.join(ROOT, "cache")

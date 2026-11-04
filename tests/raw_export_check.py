@@ -30,10 +30,9 @@ sys.path.insert(0, os.path.join(APP, "app"))
 import paths                                                          # noqa: E402
 from core import loader, raw as raw_mod, render                       # noqa: E402
 from core.model import Group, ProcessStep, Settings                   # noqa: E402
-from _samples import P  # noqa: E402
 
 OUT = os.path.join(paths.OUTPUT_DIR, "_自检", "原始导出")
-SRC = P(r"E:\XY\亚细胞定位部\4gegene\2\3164p.oib")
+SRC = r"E:\XY\亚细胞定位部\4gegene\2\3164p.oib"
 BOX = dict(x=0.0, y=0.0, w=20.0, h=20.0)
 
 

@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (QComboBox, QHBoxLayout, QLabel, QSpinBox, QVBoxLa
                                QWidget)
 
 from ui.card import card
-from ui.cards._helpers import pair, plab
+from ui.cards._helpers import cell, pair, plab, two_col
 from ui.widgets import BrutalButton, FloatField
 
 
@@ -26,12 +26,12 @@ def build(win):
                           "Mean 平均", "SD 标准差"])
     win.cb_proj.setToolTip("把一段 Z 层压成一张二维图；XY 标定不变，裁剪框与标尺照旧")
     win.cb_proj.currentIndexChanged.connect(win.on_proj_changed)
-    lay.addLayout(pair("模式", win.cb_proj))
+    lay.addWidget(cell("模式", win.cb_proj))
     win.cb_proj_range = QComboBox()
     win.cb_proj_range.setObjectName("field")
     win.cb_proj_range.addItems(["全部层", "当前层 ± n", "手动起止层"])
     win.cb_proj_range.currentIndexChanged.connect(win.on_proj_range_changed)
-    lay.addLayout(pair("范围", win.cb_proj_range))
+    lay.addWidget(cell("范围", win.cb_proj_range))
     win.sp_proj_n = QSpinBox()
     win.sp_proj_n.setObjectName("field")
     win.sp_proj_n.setRange(0, 999)
@@ -44,9 +44,8 @@ def build(win):
         w.setObjectName("field")
         w.setRange(1, 9999)
         w.valueChanged.connect(win.on_proj_changed)
-    lay.addLayout(pair("±n", win.sp_proj_n))
-    lay.addLayout(pair("起止层", win.sp_proj_from))
-    lay.addLayout(pair("", win.sp_proj_to))
+    lay.addWidget(cell("±n", win.sp_proj_n))
+    lay.addWidget(two_col(win.sp_proj_from, win.sp_proj_to, "起始层", "结束层"))
     win.lbl_proj_hint = QLabel("")
     win.lbl_proj_hint.setObjectName("muted")
     win.lbl_proj_hint.setWordWrap(True)

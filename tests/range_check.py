@@ -28,10 +28,9 @@ import paths                                                            # noqa: 
 from core import loader, render                                         # noqa: E402
 from core.model import Channel, Group, ImageItem, Settings              # noqa: E402
 from ui.main_window import MainWindow                                   # noqa: E402
-from _samples import P  # noqa: E402
 
 OUT = os.path.join(paths.OUTPUT_DIR, "_自检", "显示区间")
-SRC4 = P(r"E:\ImageCapture\789\Snap-14700-Airyscan Processing-04.czi")
+SRC4 = r"E:\ImageCapture\789\Snap-14700-Airyscan Processing-04.czi"
 
 
 def fake_item(name, c_count=2, frames=1, umpp=0.5, size=64, role="green", groups=None):

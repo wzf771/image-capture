@@ -11,7 +11,6 @@ sys.path.insert(0, os.path.join(APP, "app"))
 import paths                                          # noqa: E402
 from core import loader, render                       # noqa: E402
 from core.model import Group, Settings                # noqa: E402
-from _samples import P  # noqa: E402
 
 OUT = os.path.join(paths.OUTPUT_DIR, "_自检")
 
@@ -20,7 +19,7 @@ def main():
     os.makedirs(OUT, exist_ok=True)
     st = Settings.load()
     st.out_subdir = "flat"
-    item = loader.probe(P(r"E:\XY\亚细胞定位部\4gegene\2\3164p.oib"))
+    item = loader.probe(r"E:\XY\亚细胞定位部\4gegene\2\3164p.oib")
     f = item.field_um()
     # 裁剪视野是用户随时会改的参数，可能比这张图的视野还大；这里按图夹一下，
     # 否则 too_small="pad" 会把 1024 的图补成 8000+，导出一张 3 GB 的图。

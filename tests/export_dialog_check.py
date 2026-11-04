@@ -24,12 +24,11 @@ import paths                                                     # noqa: E402
 from core import loader                                          # noqa: E402
 from ui.main_window import MainWindow                            # noqa: E402
 from ui.worker import job_export                                 # noqa: E402
-from _samples import P  # noqa: E402
 
 FILES = [
-    P(r"E:\XY\亚细胞定位部\4gegene\2\3164p.oib"),
-    P(r"E:\XY\亚细胞定位部\3.31构载体两个\汇总\原始数据\2a-1.oib"),
-    P(r"E:\XY\亚细胞定位部\3.31构载体两个\6.4\ER1.oib"),
+    r"E:\XY\亚细胞定位部\4gegene\2\3164p.oib",
+    r"E:\XY\亚细胞定位部\3.31构载体两个\汇总\原始数据\2a-1.oib",
+    r"E:\XY\亚细胞定位部\3.31构载体两个\6.4\ER1.oib",
 ]
 OUT = os.path.join(paths.OUTPUT_DIR, "_导出自检_弹窗")
 
@@ -58,7 +57,7 @@ def main():
     win.resize(1400, 900)
     win.items = [loader.probe(p) for p in FILES if os.path.exists(p)]
     # 再塞一张没标定的（BMP 不给标定），用来验"灰掉、不能导"
-    bmp = P(r"E:\XY\3164p.bmp.frames\3164p_T001.bmp")
+    bmp = r"E:\XY\3164p.bmp.frames\3164p_T001.bmp"
     if os.path.exists(bmp):
         bad = loader.probe(bmp)
         bad.umpp = 0.0

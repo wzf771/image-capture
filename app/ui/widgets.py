@@ -4,18 +4,28 @@ import math
 
 from PySide6.QtCore import (QByteArray, QEasingCurve, QPointF, QRect, QRectF, QSize, Qt,
                             QVariantAnimation, Signal)
+from ui import theme
+from ui.liquid_switch import LiquidSwitch
 from PySide6.QtGui import (QBrush, QColor, QFont, QFontMetrics, QGradient,
                            QLinearGradient, QPainter, QPainterPath, QPen, QPixmap,
-                           QTransform)
-from PySide6.QtWidgets import (QCheckBox, QFrame, QGraphicsDropShadowEffect, QLabel,
-                               QLineEdit, QPushButton, QSizePolicy, QWidget)
+                           QPolygonF, QTransform)
+from PySide6.QtWidgets import (QHBoxLayout, QAbstractButton, QCheckBox, QFrame, QGraphicsDropShadowEffect,
+                               QLabel, QLineEdit, QPushButton, QSizePolicy, QWidget)
 
 try:
     from PySide6.QtSvg import QSvgRenderer
 except Exception:                                    # noqa: BLE001
     QSvgRenderer = None
 
-ACCENT = QColor("#5B5BD6")
+ACCENT = QColor("#A8642A")
+
+# 导入图标：Lucide folder-open（用户指定）
+SETTINGS_SVG = """<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='{c}' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'><path d='M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831 2.34 2.34 0 0 1 2.33-4.033 2.34 2.34 0 0 0 3.319-1.915'/><circle cx='12' cy='12' r='3'/></svg>"""
+
+GROUP_SVG = """<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='{c}' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'><rect width='20' height='8' x='2' y='2' rx='2' ry='2'/><rect width='20' height='8' x='2' y='14' rx='2' ry='2'/><line x1='6' x2='6.01' y1='6' y2='6'/><line x1='6' x2='6.01' y1='18' y2='18'/></svg>"""
+
+FOLDER_OPEN_SVG = """<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='{c}' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2'/></svg>"""
+
 TRACK = QColor("#EDEEF5")
 
 
@@ -28,105 +38,11 @@ def _mix(a: QColor, b: QColor, t: float) -> QColor:
                   int(a.alpha() + (b.alpha() - a.alpha()) * t))
 
 
-class MiniSwitch(QCheckBox):
-    """细杆圆点开关（照 Uiverse 的 .toggle 复刻，2026-09-23 用户指定为全局唯一样式）。
+class MiniSwitch(LiquidSwitch):
+    """全局开关：行为见 ui/liquid_switch.py（Bencho Liquid toggle 的 Qt 移植）。
 
-    尺寸就按原稿来：整体 40×20，底槽 34×14（左上各内缩 3px、圆角 8），圆点 20×20 ——
-    关：白点带 3px 柔影停在左边；开：变 #4f2edc 并右移 20px（translateX(20px)）。
-    底槽 关=#9a9999 / 开=#947ada；圆点位置 0.2s cubic-bezier(0.8,0.4,0.3,1.25)（末端回弹），
-    底色 0.15s 渐变；打开时还有一圈 56px 的紫涟漪扩散淡出（原稿的 span:before）。
-    **整块都能点** —— 用户反馈过"只有最左边那点能触发"。
+    旧名字（Switch / FlipSwitch / ToggleSwitch）都继承它，所以全软件的开关一次性换掉。
     """
-
-    W, H = 40, 20
-    KNOB = 20.0
-    TRACK_OFF = QColor("#9a9999")
-    TRACK_ON = QColor("#947ada")
-    KNOB_OFF = QColor("#FFFFFF")
-    KNOB_ON = QColor("#4f2edc")
-    WAVE = QColor(79, 46, 220, 128)
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setCursor(Qt.PointingHandCursor)
-        self.setFixedSize(self.W, self.H)
-        self.setToolTip("点一下开 / 关")
-        self._p = 1.0 if self.isChecked() else 0.0
-        self._wave = 0.0
-        self._anim = QVariantAnimation(self)
-        self._anim.setDuration(200)
-        curve = QEasingCurve()
-        curve.setType(QEasingCurve.BezierSpline)
-        curve.addCubicBezierSegment(QPointF(0.8, 0.4), QPointF(0.3, 1.25), QPointF(1.0, 1.0))
-        self._anim.setEasingCurve(curve)
-        self._anim.valueChanged.connect(self._tick)
-        self._wave_anim = QVariantAnimation(self)
-        self._wave_anim.setDuration(400)
-        self._wave_anim.setEasingCurve(QEasingCurve.OutCubic)
-        self._wave_anim.valueChanged.connect(self._tick_wave)
-        self.toggled.connect(self._on_toggled)
-
-    def sizeHint(self):
-        return QSize(self.W, self.H)
-
-    def hitButton(self, pos):
-        """整块都能点（QCheckBox 默认只有指示器那一小块能点）。"""
-        return self.rect().contains(pos)
-
-    # -------------------------------------------------- 动画
-    def _tick(self, value):
-        self._p = float(value)
-        self.update()
-
-    def _tick_wave(self, value):
-        self._wave = float(value)
-        self.update()
-
-    def _on_toggled(self, on):
-        target = 1.0 if on else 0.0
-        self._anim.stop()
-        if not self.isVisible():                  # 初始化设值别演一遍动画
-            self._p = target
-            self.update()
-        else:
-            self._anim.setStartValue(float(self._p))
-            self._anim.setEndValue(target)
-            self._anim.start()
-        if on and self.isVisible():               # 打开时来一圈涟漪
-            self._wave_anim.stop()
-            self._wave = 0.0
-            self._wave_anim.setStartValue(0.0)
-            self._wave_anim.setEndValue(1.0)
-            self._wave_anim.start()
-
-    # -------------------------------------------------- 画
-    def paintEvent(self, _ev):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing, True)
-        t = max(0.0, min(1.0, self._p))
-        cx = self.KNOB * t + self.KNOB / 2.0      # 圆点中心：从左 10px 走到 30px
-        cy = self.H / 2.0
-        if 0.0 < self._wave < 1.0:                # 涟漪：56px 紫圈扩散 + 淡出
-            grow = 56.0 * self._wave
-            a = int(self.WAVE.alpha() * (1.0 - self._wave))
-            if a > 0 and grow > 1.0:
-                p.setPen(Qt.NoPen)
-                p.setBrush(QColor(self.WAVE.red(), self.WAVE.green(), self.WAVE.blue(), a))
-                p.drawEllipse(QRectF(cx - grow / 2.0, cy - grow / 2.0, grow, grow))
-        # 底槽 34×14（圆角 8）
-        p.setPen(Qt.NoPen)
-        p.setBrush(_mix(self.TRACK_OFF, self.TRACK_ON, t))
-        p.drawRoundedRect(QRectF(3.0, 3.0, 34.0, 14.0), 8.0, 8.0)
-        # 圆点：先铺柔影再盖本体（0 3px 8px 的 box-shadow 手绘近似）
-        base = QColor(154, 153, 153, 70) if t < 0.5 else QColor(79, 46, 220, 50)
-        for dy, k in ((3.0, 0.45), (2.0, 0.7), (1.0, 1.0)):
-            c = QColor(base)
-            c.setAlpha(int(base.alpha() * k))
-            p.setBrush(c)
-            p.drawEllipse(QRectF(cx - self.KNOB / 2.0, cy - self.KNOB / 2.0 + dy,
-                                 self.KNOB, self.KNOB))
-        p.setBrush(_mix(self.KNOB_OFF, self.KNOB_ON, t))
-        p.drawEllipse(QRectF(cx - self.KNOB / 2.0, cy - self.KNOB / 2.0, self.KNOB, self.KNOB))
 
 
 class Switch(MiniSwitch):
@@ -280,15 +196,16 @@ class BrutalButton(QPushButton):
     白字 600、圆角 2（都是原稿值）。
     """
 
-    BG = QColor("#424242")
-    BG_HOVER = QColor("#353535")
-    BG_DOWN = QColor("#181818")
-    BG_CHECKED = QColor("#5B5BD6")
-    BG_CHECKED_HOVER = QColor("#4E4EC4")
-    BG_OFF = QColor("#6E6E78")        # 禁用
-    TEXT = QColor("#FFFFFF")
-    RADIUS = 2.0
-    RESERVE = 4                       # 四周给外投影留的位置
+    BG = QColor(33, 30, 24, 9)                 # 常态：极淡的一层底，避免看起来像纯文字
+    BG_HOVER = QColor("#E8E5DE")
+    BG_DOWN = QColor("#DFDBD2")
+    BG_CHECKED = QColor("#F2E7DB")          # 选中：弱底
+    BG_CHECKED_HOVER = QColor("#EBDCCB")
+    BG_OFF = QColor(0, 0, 0, 0)                # 禁用
+    TEXT = QColor("#211E18")
+    TEXT_ON = QColor("#FFFFFF")
+    RADIUS = 6.0
+    RESERVE = 1                       # 只留 1px 抗锯齿余量
 
     def __init__(self, text="", parent=None, compact=False):
         super().__init__(text, parent)
@@ -303,6 +220,7 @@ class BrutalButton(QPushButton):
         self.setFont(f)
         self._hover = False
         self._down = False
+        self._track = False        # True = 放在 SegTrack 里，自己不再铺底
 
     def sizeHint(self):
         fm = QFontMetrics(self.font())
@@ -334,41 +252,150 @@ class BrutalButton(QPushButton):
         super().mouseReleaseEvent(ev)
 
     def paintEvent(self, _ev):
+        """扁平按钮：透明底 + 悬停浅底；勾选 = 强调色实底。"""
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
         rr = float(self.RESERVE)
         body = QRectF(rr, rr, max(1.0, self.width() - 2 * rr),
                       max(1.0, self.height() - 2 * rr))
         if not self.isEnabled():
-            bg = self.BG_OFF
-        elif self._down:
-            bg = self.BG_DOWN
+            bg, fg = self.BG, QColor("#A39A8C")
         elif self.isChecked():
             bg = self.BG_CHECKED_HOVER if self._hover else self.BG_CHECKED
+            fg = self.TEXT
+        elif self._down:
+            bg, fg = self.BG_DOWN, self.TEXT
+        elif self._hover:
+            # 连体底里的按钮：悬停只加一层更深的底
+            bg = QColor(33, 30, 24, 16) if self._track else self.BG_HOVER
+            fg = self.TEXT
         else:
-            bg = self.BG_HOVER if self._hover else self.BG
-        # 外投影 0 1px 2px 1px rgba(0,0,0,.6)：由外向内叠三层，越靠外越淡
-        p.setPen(Qt.NoPen)
-        for grow, alpha in ((2.0, 40), (1.5, 55), (0.0, 70)):
-            p.setBrush(QColor(0, 0, 0, alpha))
-            p.drawRoundedRect(body.adjusted(-grow, -grow + 1.0, grow, grow + 1.0),
-                              self.RADIUS + grow, self.RADIUS + grow)
-        # 本体 + 1px 深色描边
-        p.setBrush(bg)
-        p.setPen(QPen(QColor(0, 0, 0, 179), 1.0))
-        p.drawRoundedRect(body.adjusted(0.5, 0.5, -0.5, -0.5), self.RADIUS, self.RADIUS)
-        # 内阴影：常态顶亮底暗；按下反过来（0 0 0 1px rgba(0,0,0,.7) inset）
-        top = QColor(0, 0, 0, 90) if self._down else QColor(255, 255, 255, 26)
-        bot = QColor(255, 255, 255, 12) if self._down else QColor(0, 0, 0, 179)
-        x0, x1 = body.left() + self.RADIUS + 1.0, body.right() - self.RADIUS - 1.0
-        p.setPen(QPen(top, 1.0))
-        p.drawLine(QPointF(x0, body.top() + 1.0), QPointF(x1, body.top() + 1.0))
-        p.setPen(QPen(bot, 1.0))
-        p.drawLine(QPointF(x0, body.bottom() - 1.0), QPointF(x1, body.bottom() - 1.0))
-        # 文字：白字居中
-        p.setPen(self.TEXT if self.isEnabled() else QColor(255, 255, 255, 120))
+            bg, fg = self.BG, self.TEXT
+        if self._track and not (self.isChecked() or self._hover or self._down):
+            bg = QColor(0, 0, 0, 0)
+        if bg.alpha() > 0:
+            p.setPen(Qt.NoPen)
+            p.setBrush(bg)
+            p.drawRoundedRect(body, self.RADIUS, self.RADIUS)
+        p.setPen(fg)
         p.setFont(self.font())
-        p.drawText(body, Qt.AlignCenter, self.text())
+        p.drawText(self.rect(), Qt.AlignCenter, self.text())
+
+
+class HoverRingButton(BrutalButton):
+    """兼容旧引用：描边动画已取消，现在与 BrutalButton 完全一致。"""
+
+
+class IconTextButton(BrutalButton):
+    """文字 + 左侧图标；**常态无底色**，悬停/选中才铺胶囊底；悬停时图标放大到 1.2×。"""
+
+    ICON = 16
+    GAP = 6
+
+    def __init__(self, text="", icon="", parent=None):
+        super().__init__(text, parent, compact=False)
+        self._icon = icon
+        self.BG = QColor(0, 0, 0, 0)          # 常态透明：只看到文字和图标
+        self.setFixedHeight(30)
+        self._icon_p = 0.0                    # 0 = 原始大小，1 = 放大到 1.2×
+        self._anim = QVariantAnimation(self)
+        self._anim.setDuration(150)
+        self._anim.setEasingCurve(QEasingCurve.OutCubic)
+        self._anim.valueChanged.connect(self._on_icon_anim)
+
+    def _on_icon_anim(self, v):
+        self._icon_p = float(v)
+        self.update()
+
+    def _animate_icon(self, to):
+        self._anim.stop()
+        self._anim.setStartValue(self._icon_p)
+        self._anim.setEndValue(float(to))
+        self._anim.start()
+
+    def enterEvent(self, ev):
+        super().enterEvent(ev)
+        self._animate_icon(1.0)
+
+    def leaveEvent(self, ev):
+        super().leaveEvent(ev)
+        self._animate_icon(0.0)
+
+    def mouseReleaseEvent(self, ev):
+        super().mouseReleaseEvent(ev)
+        self._animate_icon(0.0)               # 点击结束后恢复原状
+
+    def sizeHint(self):
+        fm = QFontMetrics(self.font())
+        return QSize(fm.horizontalAdvance(self.text()) + self.ICON + self.GAP + 30,
+                     max(30, fm.height() + 13))
+
+    def paintEvent(self, _ev):
+        from ui.magnifying_dock import paint_svg
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        r = QRectF(self.rect())
+        if not self.isEnabled():
+            fg = QColor("#A39A8C")
+            bg = QColor(0, 0, 0, 0)
+        elif self.isChecked():
+            fg = self.TEXT
+            bg = self.BG_CHECKED_HOVER if self._hover else self.BG_CHECKED
+        elif self._down:
+            fg = self.TEXT
+            bg = self.BG_DOWN
+        elif self._hover:
+            fg = self.TEXT
+            bg = QColor(33, 30, 24, 16)
+        else:
+            fg = self.TEXT
+            bg = QColor(0, 0, 0, 0)
+        if bg.alpha() > 0:
+            p.setPen(Qt.NoPen)
+            p.setBrush(bg)
+            rr = r.adjusted(0.5, 0.5, -0.5, -0.5)
+            rad = rr.height() / 2.0            # 胶囊：两端全圆
+            p.drawRoundedRect(rr, rad, rad)
+        fm = QFontMetrics(self.font())
+        tw = fm.horizontalAdvance(self.text())
+        total = self.ICON + (self.GAP if tw else 0) + tw
+        x = (self.width() - total) / 2.0
+        cy = self.height() / 2.0
+        if self._icon:
+            side = self.ICON * (1.0 + 0.2 * self._icon_p)
+            cx = x + self.ICON / 2.0
+            paint_svg(p, self._icon,
+                      QRectF(cx - side / 2.0, cy - side / 2.0, side, side),
+                      fg if not self.isChecked() else QColor(theme.PRIMARY_DARK))
+            x += self.ICON + self.GAP
+        p.setPen(fg)
+        p.setFont(self.font())
+        p.drawText(QRectF(x, 0, tw + 2, self.height()),
+                   Qt.AlignVCenter | Qt.AlignLeft, self.text())
+
+
+class SegTrack(QWidget):
+    """几个扁平按钮共用一条圆角底（分段控件），底色连在一起。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(2, 2, 2, 2)
+        lay.setSpacing(0)
+        self._lay = lay
+
+    def add(self, btn):
+        btn._track = True
+        btn.RADIUS = 6.0
+        self._lay.addWidget(btn)
+
+    def paintEvent(self, _ev):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(33, 30, 24, 10))
+        p.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 8, 8)
 
 
 class SweepButton(BrutalButton):
@@ -381,8 +408,7 @@ class SweepButton(BrutalButton):
 
     def __init__(self, text="", parent=None):
         super().__init__(text, parent, compact=False)
-        f = self.font()
-        f.setPixelSize(13)
+        f = theme.ui_font(theme.SIZE_TITLE)
         self.setFont(f)
 
     def sizeHint(self):
@@ -409,7 +435,7 @@ class IconSlideButton(QPushButton):
     缓动 0.5s cubic-bezier(0.76, 0, 0.24, 1)，跟给的代码一致。
     """
 
-    GRAD = ("#0F0C29", "#302B63", "#24243E")
+    GRAD = ("#A8642A", "#A8642A", "#A8642A")
     PAD_L, ICON, GAP, PAD_R = 12, 18, 4, 12
 
     def __init__(self, text="Download", parent=None):
@@ -477,13 +503,11 @@ class IconSlideButton(QPushButton):
         p.setRenderHint(QPainter.Antialiasing, True)
         p.setRenderHint(QPainter.SmoothPixmapTransform, True)
         r = QRectF(self.rect())
-        g = QLinearGradient(0.0, 0.0, max(1.0, r.width()), 0.0)   # 深色渐变底
-        g.setColorAt(0.0, QColor(self.GRAD[0]))
-        g.setColorAt(0.5, QColor(self.GRAD[1]))
-        g.setColorAt(1.0, QColor(self.GRAD[2]))
+        # 扁平化：不再渐变，强调色实底（悬停略深）
         p.setPen(Qt.NoPen)
-        p.setBrush(g)
-        p.drawRoundedRect(r, 16, 16)
+        # 用主题令牌，换配色时这里会跟着变（原来写死了两个十六进制）
+        p.setBrush(QColor(theme.PRIMARY_DARK) if self.underMouse() else QColor(theme.PRIMARY))
+        p.drawRoundedRect(r, 8, 8)
         if not self.isEnabled():
             p.setOpacity(0.45)
         t = self._t
@@ -517,10 +541,10 @@ class LoaderBar(QWidget):
     """
 
     W, H = 226, 10
-    BG = QColor("#F9F9F9")
-    EDGE = QColor("#006DFE")
-    DARK = QColor("#0031F2")
-    LIGHT = QColor("#006DFE")
+    BG = QColor("#E8E5DE")
+    EDGE = QColor("#A8642A")
+    DARK = QColor("#8E5322")
+    LIGHT = QColor("#A8642A")
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -622,8 +646,8 @@ class LockDot(QCheckBox):
     DESIGN = 45.0               # 原稿尺寸，所有比例都按它算
     BOX = 20.0                  # 实际显示大小（跟原来的小圈一样）
     RADIUS = 15.0               # .lock-label 圆角
-    BG_OFF = QColor(80, 80, 80)
-    BG_ON = QColor(167, 71, 245)
+    BG_OFF = QColor(140, 133, 122)
+    BG_ON = QColor(168, 100, 42)
     TILT = -10.0                # .lock-wrapper 恒定的 -10°
     SW, SH = 14.0, 9.0          # .shackle 的宽 / 高
     STROKE = 3.0                # 锁梁线宽（原稿 3px 边框）
@@ -858,9 +882,9 @@ class FloatField(QWidget):
         self.lab.setObjectName("fieldLab")
         self.lab.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self._f_rest = QFont(self.font())
-        self._f_rest.setPixelSize(12)
+        self._f_rest.setPixelSize(12.5)
         self._f_float = QFont(self.font())
-        self._f_float.setPixelSize(10)
+        self._f_float.setPixelSize(11)
         self._f_float.setWeight(QFont.DemiBold)
         self.edit.textChanged.connect(lambda _t: self._place())
         self.edit.focusChanged.connect(lambda _on: self._place())
@@ -883,12 +907,12 @@ class FloatField(QWidget):
         floating = bool(self.edit.text().strip()) or self.edit.hasFocus()
         if floating:
             self.lab.setFont(self._f_float)
-            self.lab.setStyleSheet("color:#5B5BD6;")
+            self.lab.setStyleSheet("color:#000000;")
             self.lab.adjustSize()
             self.lab.move(6, max(0, top - self.lab.height() - 4))
         else:
             self.lab.setFont(self._f_rest)
-            self.lab.setStyleSheet("color:#8A8AA3;")
+            self.lab.setStyleSheet("color:#000000;")
             self.lab.adjustSize()
             self.lab.move(14, top + (box_h - self.lab.height()) // 2)
 
@@ -949,3 +973,178 @@ class FloatField(QWidget):
         self._place()
         if changed and not self.signalsBlocked():
             self.valueChanged.emit(v)
+
+class RailButton(QAbstractButton):
+    """左栏图标按钮：上面一条线图标，下面 11px 文字（图标靠 QPainter 画）。"""
+
+    W, H = 64, 56
+
+    def __init__(self, key, text, parent=None):
+        super().__init__(parent)
+        self._key = key
+        self.setText(text)
+        self.setCheckable(True)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedSize(self.W, self.H)
+        self.setToolTip(text)
+        self._hover = False
+        # 悬停时图标放大到 1.2×，移开 / 点击后缩回（2026-11-03）
+        self._ip = 0.0
+        self._ianim = QVariantAnimation(self)
+        self._ianim.setDuration(150)
+        self._ianim.setEasingCurve(QEasingCurve.OutCubic)
+        self._ianim.valueChanged.connect(self._on_icon_anim)
+
+    def _on_icon_anim(self, v):
+        self._ip = float(v)
+        self.update()
+
+    def _anim_icon(self, to):
+        self._ianim.stop()
+        self._ianim.setStartValue(self._ip)
+        self._ianim.setEndValue(float(to))
+        self._ianim.start()
+
+    def enterEvent(self, ev):
+        self._hover = True
+        self._anim_icon(1.0)
+        self.update()
+        super().enterEvent(ev)
+
+    def leaveEvent(self, ev):
+        self._hover = False
+        self._anim_icon(0.0)
+        self.update()
+        super().leaveEvent(ev)
+
+    def mouseReleaseEvent(self, ev):
+        super().mouseReleaseEvent(ev)
+        self._anim_icon(0.0)
+
+    def sizeHint(self):
+        return QSize(self.W, self.H)
+
+    # ------------------------------------------------ 图标
+    def _icon(self, p, r, color):
+        k = self._key
+        p.setPen(QPen(color, 1.7, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.setBrush(Qt.NoBrush)
+        x, y, w, h = r.x(), r.y(), r.width(), r.height()
+        if k in ("import", "group", "settings") and QSvgRenderer is not None:
+            svg = {"import": FOLDER_OPEN_SVG, "group": GROUP_SVG,
+                   "settings": SETTINGS_SVG}.get(k, "").replace("{c}", color.name())
+            r2 = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+            if r2.isValid():
+                side = min(w, h) - 4
+                r2.render(p, QRectF(x + (w - side) / 2.0, y + (h - side) / 2.0, side, side))
+                return
+
+        if k == "import":
+            if QSvgRenderer is not None:
+                svg = FOLDER_OPEN_SVG.replace("{c}", color.name())
+                r2 = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+                if r2.isValid():
+                    side = min(w, h) - 4          # 和手绘图标一样，四周留 2px
+                    box = QRectF(x + (w - side) / 2.0, y + (h - side) / 2.0, side, side)
+                    r2.render(p, box)
+                    return
+            # 兜底：画回原来的简单箭头
+            p.drawLine(QPointF(x + 3, y + h - 3), QPointF(x + w - 3, y + h - 3))
+            p.drawLine(QPointF(x + w / 2, y + h - 4), QPointF(x + w / 2, y + 3))
+            p.drawLine(QPointF(x + w / 2 - 4, y + 7), QPointF(x + w / 2, y + 3))
+            p.drawLine(QPointF(x + w / 2 + 4, y + 7), QPointF(x + w / 2, y + 3))
+        elif k == "group":
+            p.drawPolygon(QPolygonF([QPointF(x + w / 2, y + 3), QPointF(x + w - 3, y + 8),
+                                     QPointF(x + w / 2, y + 13), QPointF(x + 3, y + 8)]))
+            p.drawLine(QPointF(x + 3, y + 12), QPointF(x + w / 2, y + 17))
+            p.drawLine(QPointF(x + w - 3, y + 12), QPointF(x + w / 2, y + 17))
+        elif k == "crop":
+            for sx, sy, dx, dy in ((3, 3, 1, 1), (w - 3, 3, -1, 1),
+                                   (3, h - 3, 1, -1), (w - 3, h - 3, -1, -1)):
+                p.drawLine(QPointF(x + sx, y + sy), QPointF(x + sx + 5 * dx, y + sy))
+                p.drawLine(QPointF(x + sx, y + sy), QPointF(x + sx, y + sy + 5 * dy))
+        elif k == "ruler":
+            p.drawLine(QPointF(x + 3, y + h - 3), QPointF(x + w - 3, y + 3))
+            for t in (0.28, 0.5, 0.72):
+                px = x + 3 + (w - 6) * t
+                py = y + h - 3 - (h - 6) * t
+                p.drawLine(QPointF(px, py), QPointF(px + 4, py - 4))
+        elif k == "channel":
+            p.drawEllipse(QRectF(x + 3, y + 3, w - 6, h - 6))
+            path = QPainterPath()
+            path.moveTo(x + w / 2, y + 3)
+            path.arcTo(QRectF(x + 3, y + 3, w - 6, h - 6), 90, -180)
+            p.setBrush(color)
+            p.setPen(Qt.NoPen)
+            p.drawPath(path)
+        elif k == "export" and QSvgRenderer is not None:
+            svg = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" '
+                   'stroke="%s" stroke-width="1.7" stroke-linecap="round" '
+                   'stroke-linejoin="round"><path d="%s"/></svg>' % (color.name(), ICON_PLANET))
+            r2 = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+            if r2.isValid():
+                side = min(w, h) - 4
+                r2.render(p, QRectF(x + (w - side) / 2.0, y + (h - side) / 2.0, side, side))
+                return
+        elif k == "download":
+            cx = x + w / 2.0
+            tip = y + h * 0.55
+            p.drawLine(QPointF(cx, y + 4), QPointF(cx, tip))
+            p.drawLine(QPointF(cx - 4.0, tip - 4.0), QPointF(cx, tip))
+            p.drawLine(QPointF(cx + 4.0, tip - 4.0), QPointF(cx, tip))
+            ty = y + h - 5
+            p.drawLine(QPointF(x + 5, ty - (h * 0.16)), QPointF(x + 5, ty))
+            p.drawLine(QPointF(x + 5, ty), QPointF(x + w - 5, ty))
+            p.drawLine(QPointF(x + w - 5, ty), QPointF(x + w - 5, ty - (h * 0.16)))
+        elif k == "roi":
+            pen = QPen(color, 1.6, Qt.DashLine, Qt.RoundCap)
+            p.setPen(pen)
+            p.drawRect(QRectF(x + 3, y + 4, w - 6, h - 8))
+            p.setBrush(color)
+            p.drawEllipse(QRectF(x + w / 2 - 1.5, y + h / 2 - 1.5, 3, 3))
+        elif k == "process":
+            for t in (0.34, 0.66):
+                yy = y + h * t
+                p.drawLine(QPointF(x + 3, yy), QPointF(x + w - 3, yy))
+                p.setBrush(QColor("#F0EEE9"))
+                p.drawEllipse(QPointF(x + w * (0.35 if t < 0.5 else 0.66), yy), 2.6, 2.6)
+                p.setBrush(Qt.NoBrush)
+        elif k == "settings":
+            p.drawEllipse(QRectF(x + w / 2 - 5, y + h / 2 - 5, 10, 10))
+            p.drawEllipse(QRectF(x + w / 2 - 1.6, y + h / 2 - 1.6, 3.2, 3.2))
+            for i in range(8):
+                import math as _m
+                a = _m.radians(i * 45)
+                px, py = x + w / 2, y + h / 2
+                p.drawLine(QPointF(px + 6.2 * _m.cos(a), py + 6.2 * _m.sin(a)),
+                           QPointF(px + 8.2 * _m.cos(a), py + 8.2 * _m.sin(a)))
+
+    def paintEvent(self, _ev):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        r = self.rect()
+        on = self.isChecked()
+        if on:
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(168, 100, 42, 26))
+            p.drawRoundedRect(QRectF(r).adjusted(1, 1, -1, -1), 8, 8)
+        elif self._hover:
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(242, 242, 240))
+            p.drawRoundedRect(QRectF(r).adjusted(1, 1, -1, -1), 8, 8)
+        color = QColor("#A8642A") if on else QColor("#5C554B")
+        has_text = bool(self.text().strip())
+        base = QRectF(0, 7 if has_text else (r.height() - 24) / 2.0, r.width(), 24)
+        sc = 1.0 + 0.2 * self._ip                 # 放大以图标中心为基准
+        iw, ih = base.width() * sc, base.height() * sc
+        self._icon(p, QRectF(base.center().x() - iw / 2, base.center().y() - ih / 2,
+                             iw, ih), color)
+        if not has_text:
+            return
+        f = QFont(self.font())
+        f.setPixelSize(11)
+        f.setWeight(QFont.DemiBold if on else QFont.Normal)
+        p.setFont(f)
+        p.setPen(color)
+        p.drawText(QRectF(0, 33, r.width(), 18), Qt.AlignHCenter | Qt.AlignTop, self.text())
+

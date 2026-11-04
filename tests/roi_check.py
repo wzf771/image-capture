@@ -32,9 +32,8 @@ from PySide6.QtWidgets import QApplication                            # noqa: E4
 
 from core import analysis, loader, roi as roi_mod                     # noqa: E402
 from ui.main_window import MainWindow                                 # noqa: E402
-from _samples import P  # noqa: E402
 
-OIB = P(r"E:\XY\亚细胞定位部\4gegene\2\3164p.oib")
+OIB = r"E:\XY\亚细胞定位部\4gegene\2\3164p.oib"
 
 
 def _ev(kind, w, x, y, btn=Qt.LeftButton, buttons=Qt.NoButton):

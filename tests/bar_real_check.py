@@ -17,9 +17,8 @@ APP = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(APP, "app"))
 
 from core import bar                                                  # noqa: E402
-from _samples import P  # noqa: E402
 
-DIR = P(r"E:\XY\3164p.bmp.frames")
+DIR = r"E:\XY\3164p.bmp.frames"
 EXPECT = 0.6185          # 改动前用同一张图实测的值（smoke.py 里也有这条）
 
 

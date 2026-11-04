@@ -15,9 +15,8 @@ from PySide6.QtWidgets import QApplication                         # noqa: E402
 import paths                                                       # noqa: E402
 from core import loader, render                                    # noqa: E402
 from ui.main_window import MainWindow                              # noqa: E402
-from _samples import P  # noqa: E402
 
-CZI = P(r"E:\ImageCapture\789\Snap-14700-Airyscan Processing-04.czi")
+CZI = r"E:\ImageCapture\789\Snap-14700-Airyscan Processing-04.czi"
 
 
 def box_physical(canvas):

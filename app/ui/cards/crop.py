@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QGridLayout, QHBoxLayout, Q
 import paths
 from core.model import CHANNEL_COLORS, FONTS, color_name
 from ui.card import ClickLabel, card
-from ui.cards._helpers import cap, pair, plab, stack
+from ui.cards._helpers import button_grid, cap, cell, pair, plab, stack, two_col
 from ui.flow import FlowLayout
 from ui.widgets import (BrutalButton, FlipSwitch, FloatField, RangeSlider, RingDot,
                         Switch, ToggleSwitch)
@@ -38,11 +38,7 @@ def build(win):
     win.chk_lock = QCheckBox("锁定 1:1 方框")
     win.chk_lock.setChecked(win.settings.lock_1to1)
     win.chk_lock.toggled.connect(win.on_lock_toggled)
-    wh = QHBoxLayout()
-    wh.setSpacing(8)
-    wh.addWidget(win.f_w, 1)
-    wh.addWidget(win.f_h, 1)
-    c.body.addLayout(wh)
+    c.body.addWidget(two_col(win.f_w, win.f_h, "宽 (µm)", "高 (µm)"))
     chips = QWidget()
     cw = FlowLayout(chips, spacing=6)
     win.pill_lock = BrutalButton("1:1", compact=True)
@@ -65,7 +61,7 @@ def build(win):
     win.pill_tosmall = BrutalButton("视野不足：补边", compact=True)
     win.pill_tosmall.clicked.connect(win.on_pill_tosmall)
     cw.addWidget(win.pill_tosmall)
-    c.body.addWidget(chips)
+    c.body.addWidget(button_grid([win.pill_lock, win.pill_free, win.pill_tosmall], cols=3))
     b_all = BrutalButton("一键应用到所有组", compact=True)
     b_all.setToolTip("把当前这组的裁剪框大小套到所有组（位置各组自己调整，放不下就靠边）")
     b_all.clicked.connect(win.apply_box_to_all)

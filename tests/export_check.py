@@ -11,15 +11,14 @@ import paths                                          # noqa: E402
 from core import loader                                # noqa: E402
 from core.model import Group, Settings                  # noqa: E402
 from ui.worker import job_export                        # noqa: E402
-from _samples import P  # noqa: E402
 
 FILES = [
-    P(r"E:\XY\亚细胞定位部\4gegene\2\3164p.oib"),
-    P(r"E:\XY\亚细胞定位部\3.31构载体两个\汇总\原始数据\2a-1.oib"),
-    P(r"E:\XY\亚细胞定位部\3.31构载体两个\汇总\原始数据\2a-2.oib"),
-    P(r"E:\XY\亚细胞定位部\3.31构载体两个\汇总\原始数据\kongzai.oib"),
-    P(r"E:\XY\亚细胞定位部\3.31构载体两个\6.4\ER1.oib"),
-    P(r"E:\XY\相分离部\6.3\6.3\frap\3-6\FRAPR1.oib"),
+    r"E:\XY\亚细胞定位部\4gegene\2\3164p.oib",
+    r"E:\XY\亚细胞定位部\3.31构载体两个\汇总\原始数据\2a-1.oib",
+    r"E:\XY\亚细胞定位部\3.31构载体两个\汇总\原始数据\2a-2.oib",
+    r"E:\XY\亚细胞定位部\3.31构载体两个\汇总\原始数据\kongzai.oib",
+    r"E:\XY\亚细胞定位部\3.31构载体两个\6.4\ER1.oib",
+    r"E:\XY\相分离部\6.3\6.3\frap\3-6\FRAPR1.oib",
 ]
 OUT = os.path.join(paths.OUTPUT_DIR, "_导出自检")
 

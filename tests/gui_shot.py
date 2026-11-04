@@ -15,21 +15,19 @@ from PySide6.QtCore import QElapsedTimer                       # noqa: E402
 import paths                                                   # noqa: E402
 from core import loader, render                                # noqa: E402
 from ui.main_window import CardFrame, ClickLabel, MainWindow   # noqa: E402
-from _samples import P  # noqa: E402
 
 FILES = [
-    P(r"E:\XY\亚细胞定位部\4gegene\2\3164p.oib"),
-    P(r"E:\XY\亚细胞定位部\3.31构载体两个\汇总\原始数据\2a-1.oib"),
-    P(r"E:\XY\亚细胞定位部\3.31构载体两个\汇总\原始数据\2a-2.oib"),
-    P(r"E:\XY\亚细胞定位部\3.31构载体两个\汇总\原始数据\kongzai.oib"),
-    P(r"E:\XY\亚细胞定位部\3.31构载体两个\6.4\ER1.oib"),
-    P(r"E:\XY\亚细胞定位部\3.31构载体两个\6.4\ER\LiveStop.oib"),
-    P(r"E:\XY\相分离部\6.3\6.3\frap\3-6\FRAPR1.oib"),
+    r"E:\XY\亚细胞定位部\4gegene\2\3164p.oib",
+    r"E:\XY\亚细胞定位部\3.31构载体两个\汇总\原始数据\2a-1.oib",
+    r"E:\XY\亚细胞定位部\3.31构载体两个\汇总\原始数据\2a-2.oib",
+    r"E:\XY\亚细胞定位部\3.31构载体两个\汇总\原始数据\kongzai.oib",
+    r"E:\XY\亚细胞定位部\3.31构载体两个\6.4\ER1.oib",
+    r"E:\XY\亚细胞定位部\3.31构载体两个\6.4\ER\LiveStop.oib",
+    r"E:\XY\相分离部\6.3\6.3\frap\3-6\FRAPR1.oib",
+    r"E:\ImageCapture\789\Snap-14700-Airyscan Processing-04.czi",
+    r"E:\ImageCapture\789\0.5h17.3B.lif",
+    r"C:\Users\王卓\Desktop\01831+oec33-7+.czi",
 ]
-
-# 额外样本（可选）：IMAGECAPTURE_EXTRA_SAMPLES 用 ; 分隔
-EXTRA = [x for x in os.environ.get("IMAGECAPTURE_EXTRA_SAMPLES", "").split(";") if x]
-FILES = FILES + EXTRA
 
 
 def wait(ms):

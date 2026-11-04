@@ -47,11 +47,10 @@ from PySide6.QtWidgets import QApplication
 import paths
 from core import loader
 from ui.main_window import MainWindow
-from _samples import P  # noqa: E402
 
 CASES = [
-    ("oib", P(r"E:\XY\亚细胞定位部\4gegene\2\3164p.oib")),
-    ("czi", P(r"E:\ImageCapture\789\Snap-14700-Airyscan Processing-04.czi")),
+    ("oib", r"E:\XY\亚细胞定位部\4gegene\2\3164p.oib"),
+    ("czi", r"E:\ImageCapture\789\Snap-14700-Airyscan Processing-04.czi"),
 ]
 BASE_DIR = os.path.join(paths.OUTPUT_DIR, "_自检", "清晰度基线")
 WIN_W, WIN_H = 1460, 940
