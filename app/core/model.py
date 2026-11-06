@@ -351,6 +351,9 @@ class Settings:
     merge_mode: str = "add"
     exp_merge: bool = True
     exp_ch: list = field(default_factory=lambda: [False, False, False])
+    # 导出内容模式：merge=只合并 / channels=只逐通道 / both=合并+逐通道
+    # 通道数不写死 3：逐通道时按每张图实际的通道数出，2/3/4 通道都能对
+    exp_mode: str = "both"
     frames_mode: str = "current"      # current / all / pick
     frame_pick: str = ""              # 例如 "1,5,12"
     # P0-3：Z 维度单独选择（frames_mode / frame_pick 从此专指时间维度，老工程行为不变）

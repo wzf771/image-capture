@@ -23,6 +23,7 @@ MUTED = "#000000"
 # —— 线 ——
 LINE = "rgba(33,30,24,0.10)"
 LINE_SOFT = "rgba(33,30,24,0.06)"
+LINE_STRONG = "rgba(33,30,24,0.16)"   # 去掉投影后，白板的边界线（已按要求改回不加深）
 BORDER_MOD = "rgba(33,30,24,0.10)"
 
 # —— 唯一强调色 ——
@@ -49,17 +50,24 @@ R_WIN = 0
 R_CARD = 8
 R_CTRL = 6
 
-# 中文用微软雅黑（图一那种黑体），英文与数字用 Times New Roman
-FONT_LATIN = "Times New Roman"
-FONT_CJK = "Microsoft YaHei"
-FONT = "'Times New Roman','Microsoft YaHei','Segoe UI',sans-serif"
+# 西文用 Inter / Segoe UI（无衬线 UI 字体），中文用微软雅黑 Light（细一档，接近参考软件）
+FONT_LATIN = "Inter"                 # 没装就自动落到下一个
+# 中文族：微软雅黑 Light（比常规雅黑细一档）。
+# 想临时试别的字体：set IMAGECAPTURE_CJK_FONT=思源黑体，重启程序即可（不用改代码）。
+import os as _os
+FONT_CJK = _os.environ.get("IMAGECAPTURE_CJK_FONT") or "Microsoft YaHei Light"
+FONT_CJK_FALLBACK = "Microsoft YaHei"
+FONT_CJK_FALLBACK2 = "Segoe UI"
+FONT = ("'Inter','Segoe UI','%s','Microsoft YaHei',sans-serif"
+        % FONT_CJK)
 
 
 def ui_font(px=12.5, weight=None, bold=False):
-    """统一字体入口：西文走 Times New Roman，中文由 Qt 自动回退到微软雅黑。"""
+    """统一字体入口：西文 Inter/Segoe UI，中文 FONT_CJK（默认微软雅黑 Light）。"""
     from PySide6.QtGui import QFont
     f = QFont()
-    f.setFamilies([FONT_LATIN, FONT_CJK, "Segoe UI"])   # 逐字符回退
+    f.setFamilies([FONT_LATIN, FONT_CJK, FONT_CJK_FALLBACK,
+                   FONT_CJK_FALLBACK2])   # 逐字符回退
     f.setPixelSize(int(round(px)))
     if bold:
         f.setBold(True)
@@ -191,7 +199,8 @@ def qss():
 
     /* ── 画布台面 ─────────────────────────────────────────── */
     /* 画布 + 右栏共用的大底板 */
-    QFrame#workspace {{ background: {STAGE}; border: none; border-radius: 10px; }}
+    /* 白板不再要悬浮投影，改用一圈稍粗的描边把边界讲清楚 */
+    QFrame#workspace {{ background: {STAGE}; border: 1px solid {LINE_STRONG}; border-radius: 10px; }}
     QFrame#stage {{ background: transparent; border: none; }}
     /* 白底板上的一切容器都透明，别用全局 QWidget 的底色盖住它 */
     QWidget#centerCol, QWidget#rightBody, QFrame#tabbar,
@@ -199,8 +208,15 @@ def qss():
     QFrame#rightWrap QScrollArea > QWidget#qt_scrollarea_viewport,
     QWidget#rightWrap QWidget#rightBody {{ background: transparent; }}
 
+    /* 右栏卡片内容区：不画底色，让白底板透出来 */
+    QWidget[flat="true"], QWidget#cardBody {{ background: transparent; }}
+
     /* ── 通用面：扁平化后不留边框和底色 ───────────────────── */
     QFrame#card {{ background: transparent; border: none; border-radius: 0; }}
+    /* 左栏两块卡框：分组 / 组内图片 */
+    QFrame#sideBox {{ background: transparent; border: none; }}
+    QLabel#sideCap {{ background: transparent; color: {TEXT}; font-size: 11px;
+                      font-weight: 600; padding: 0 2px 0 2px; }}
     /* 白板底部这一带：里面所有普通容器一律透明，免得全局 QWidget 的底色切出灰带 */
     QFrame#chipCard, QFrame#chipCard QWidget {{ background: transparent; }}
     /* 真正的输入控件要给回底色（同特异性、写在后面，所以它赢） */
@@ -255,6 +271,7 @@ def qss():
     QPushButton#softField:hover {{ border-color: {LINE}; }}
 
     /* ── 输入 ─────────────────────────────────────────────── */
+    /* 输入框要和按钮同底色（FIELD），不然看着不像能输入的地方 */
     QLineEdit#field, QComboBox#field, QSpinBox#field, QDoubleSpinBox#field {{
         background: {FIELD}; border: 1px solid transparent; border-radius: {R_CTRL}px;
         padding: 5px 9px; color: {TEXT}; font-size: 12.5px; font-weight: 500; }}

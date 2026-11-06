@@ -237,6 +237,8 @@ def card(title, hint="", collapsible=True, header_widget=None, module=False):
             hl.addWidget(h)
         outer.addLayout(hl)
     body = QWidget()
+    body.setObjectName("cardBody")
+    body.setProperty("flat", True)          # 不画底色（全局 QWidget 规则会切出灰块）
     lay = QVBoxLayout(body)
     if module:
         lay.setContentsMargins(12, 8, 12, 12)

@@ -28,12 +28,12 @@
 
 ## 下载
 
-**Windows x64 · 版本 1.0.4**
+**Windows x64 · 版本 1.0.5**
 
 | 包 | 说明 |
 |---|---|
-| ImageCapture_Setup_1.0.4.exe（66 MB） | 安装版：装到 %LOCALAPPDATA%\Programs\ImageCapture，免管理员，带开始菜单 / 桌面快捷方式与卸载项 |
-| ImageCapture_1.0.4_portable_win64.zip（96 MB） | 便携版：解压即用，绿色免安装，配置与输出都在自己目录里 |
+| ImageCapture_Setup_1.0.5.exe（73 MB） | 安装版：装到 %LOCALAPPDATA%\Programs\ImageCapture，免管理员，带开始菜单 / 桌面快捷方式与卸载项 |
+| ImageCapture_1.0.5_portable_win64.zip | 便携版：解压即用，绿色免安装，配置与输出都在自己目录里 |
 
 两个包都不需要预装 Python；首次启动约 2 秒。
 

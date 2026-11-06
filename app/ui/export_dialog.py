@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QFrame, QHBoxLayout, QLabel,
                                QLineEdit, QScrollArea, QTreeWidget, QTreeWidgetItem,
                                QVBoxLayout, QWidget)
 
+from core import render
 from ui.widgets import BrutalButton, FlipSwitch
 
 GREY = QColor("#9AA0AE")
@@ -130,19 +131,25 @@ class ExportDialog(QDialog):
         lay.setContentsMargins(2, 0, 10, 0)
         lay.setSpacing(6)
 
-        # ---- 常用：彩色合并 / 逐通道彩图
+        # ---- 常用：三选一（合并 / 逐通道 / 合并+逐通道）
         lay.addWidget(_cap("常用", "cardHint"))
-        win.chk_merge = FlipSwitch()
-        win.chk_merge.setChecked(win.settings.exp_merge)
-        win.chk_merge.toggled.connect(win.on_any_setting)
-        lay.addLayout(win._switch_row(win.chk_merge, "合并彩色图（Merge）"))
-        win.chk_ch = []
-        for i, text in enumerate(("CH1 单独一张", "CH2 单独一张", "CH3 单独一张")):
-            sw = FlipSwitch()
-            sw.setChecked(bool(win.settings.exp_ch[i]) if i < len(win.settings.exp_ch) else False)
-            sw.toggled.connect(win.on_any_setting)
-            win.chk_ch.append(sw)
-            lay.addLayout(win._switch_row(sw, text))
+        win.exp_mode = getattr(win.settings, "exp_mode", "both")
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        win.pill_exp = {}
+        for key, text, tip in (
+                ("merge", "合并", "每张出一张彩色合并图"),
+                ("channels", "逐通道", "每个通道各出一张；2/3/4 通道按每张图的实际情况出"),
+                ("both", "合并 + 逐通道", "两种都出")):
+            b = BrutalButton(text, compact=True)
+            b.setCheckable(True)
+            b.setChecked(win.exp_mode == key)
+            b.setToolTip(tip)
+            b.clicked.connect(lambda _checked=False, k=key: win.set_export_mode(k))
+            win.pill_exp[key] = b
+            row.addWidget(b)
+        row.addStretch(1)
+        lay.addLayout(row)
 
         # ---- 原始位深（P0-2）
         lay.addWidget(_cap("原始位深", "cardHint"))
@@ -372,14 +379,13 @@ class ExportDialog(QDialog):
         """底部那行：几张 → 几个文件。算法跟 refresh_manifest 一模一样（不另写一套）。"""
         picked = self._picked_rows()
         st = self.win._sync_settings()
-        variants = (1 if st.exp_merge else 0) + sum(1 for x in st.exp_ch if x)
         files = 0
         for it, _g in picked:
             try:
                 nf = len(self.win._frames_for(it))
             except Exception:                            # noqa: BLE001
                 nf = 1
-            files += nf * variants
+            files += nf * render.variant_count(it, st)
             if st.exp_raw_single:
                 files += nf * max(1, len(it.channels or []))
             if st.exp_raw_stack:

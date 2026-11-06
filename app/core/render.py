@@ -333,12 +333,20 @@ def channel_variants(item, st):
     out = []
     if st.exp_merge:
         out.append((st.out_suffix, None))
-    for i, want in enumerate(st.exp_ch[:3]):
-        if not want or i >= len(item.channels):
-            continue
-        ch = item.channels[i]
-        out.append((st.out_suffix + "_%s" % _tag(ch, i), [i]))
+    # 逐通道：**按这张图实际的通道数**来，不再写死 3 路
+    for i, ch in enumerate(item.channels or []):
+        if i < len(st.exp_ch) and st.exp_ch[i]:
+            out.append((st.out_suffix + "_%s" % _tag(ch, i), [i]))
     return out
+
+
+def variant_count(item, st):
+    """这张图会出几个彩图文件（和 channel_variants 必须一致）。"""
+    n = 1 if st.exp_merge else 0
+    for i in range(len(item.channels or [])):
+        if i < len(st.exp_ch) and st.exp_ch[i]:
+            n += 1
+    return n
 
 
 def _tag(ch, i):
@@ -508,6 +516,14 @@ def export_raw(item, st, stack, frame, rect, folder, stem, log=None):
     return written, notes, dtype
 
 
+def _safe_name(text):
+    """文件名里不能出现的字符换掉：LIF 的序列名常带 "/"（如「序列 1/33」），
+    直接当文件名会写到不存在的子目录里，导出直接失败。"""
+    bad = '<>:"/\\|?*'
+    out = "".join("_" if c in bad else c for c in str(text))
+    return out.strip().strip(".") or "image"
+
+
 def export_item(item, group, st, frame=0, out_root=None, log=None):
     """导出单张（一帧）的所有勾选内容，返回 (写出的文件列表, 报告行)。"""
     # 组里如果设了自定义标尺位置，导出时就用这个位置（和界面上拖好的位置一致）
@@ -540,7 +556,7 @@ def export_item(item, group, st, frame=0, out_root=None, log=None):
     sub = group.title.replace("/", "_").replace("\\", "_")
     folder = os.path.join(out_root, sub) if st.out_subdir == "by_group" else out_root
     os.makedirs(folder, exist_ok=True)
-    stem = os.path.splitext(item.name)[0]
+    stem = _safe_name(os.path.splitext(item.name)[0])
     # 文件名按维度标（规格书 3.18.5）：z003 / t005 / 两者都有就都写上
     t_i, z_i = item.tz_of(frame)
     tag = ""

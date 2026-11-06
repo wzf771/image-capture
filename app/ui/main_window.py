@@ -13,11 +13,13 @@ import json
 import numpy as np
 from PySide6.QtCore import (QEasingCurve, QElapsedTimer, QEvent, QObject, QPoint, QPointF,
                             QPropertyAnimation, Property, QRect, QRectF, QRunnable, QSize, Qt,
+                            QVariantAnimation,
                             QThread, QThreadPool, QTimer, Signal)
 from PySide6.QtGui import (QColor, QCursor, QFont, QIcon, QImage, QKeySequence, QPainter,
                            QPen,
-                           QPixmap, QShortcut)
+                           QPixmap, QShortcut, QPolygonF, QPainterPath)
 from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QFrame,
+                               QGraphicsOpacityEffect,
                                QGraphicsBlurEffect, QGraphicsDropShadowEffect, QGraphicsScene,
                                QGraphicsPixmapItem, QHBoxLayout,
                                QSizeGrip,
@@ -57,37 +59,72 @@ class BodyWidget(QWidget):
         super().__init__(parent)
         self._shadow = None
         self._shadow_size = None
+        self._repaint_queued = False
+        self.anim_lock = False                   # 左栏展开动画期间：跳过投影，避免每帧整块重画
+        self.shadow_k = 1.0                      # 投影不透明度（动画时置 0，落定后恢复）
 
-    def _make_shadow(self, w, h):
-        """一圈圈叠加出来的柔和投影，尺寸变化时才重算（一次 ~1ms）。"""
-        pad = self.PAD
-        dpr = float(self.devicePixelRatioF() or 1.0)
-        pm = QPixmap(int((w + 2 * pad) * dpr), int((h + 2 * pad) * dpr))
-        pm.setDevicePixelRatio(dpr)
-        pm.fill(Qt.transparent)
-        p = QPainter(pm)
-        p.setRenderHint(QPainter.Antialiasing, True)
-        p.setPen(Qt.NoPen)
-        for i in range(pad, 0, -2):
-            p.setBrush(QColor(33, 30, 24, 2))
-            p.drawRoundedRect(QRectF(pad - i, pad - i, w + 2 * i, h + 2 * i),
-                              10 + i, 10 + i)
-        p.end()
-        return pm
+    def set_panel(self, ws):
+        """挂上白板，并监听它的位移/尺寸变化。"""
+        self.workspace = ws
+        try:
+            ws.installEventFilter(self)
+        except Exception:                        # noqa: BLE001
+            pass
+
+    def _queue_repaint(self):
+        if self._repaint_queued:
+            return
+        self._repaint_queued = True
+
+        def _do():
+            self._repaint_queued = False
+            self.update()
+        QTimer.singleShot(0, _do)
+
+    def eventFilter(self, obj, ev):              # noqa: N802
+        # 白板左边缘挪动（展开/收起分组栏）时，旧位置的投影必须擦掉
+        if obj is getattr(self, "workspace", None) and ev.type() in (
+                QEvent.Move, QEvent.Resize, QEvent.Show, QEvent.Hide):
+            self._queue_repaint()
+        return super().eventFilter(obj, ev)
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        self.update()
 
     def paintEvent(self, _ev):
+        # 不再画投影（用户要求去掉悬浮感，改成白板自身描边）
         p = QPainter(self)
         p.fillRect(self.rect(), QColor(theme.BG))
-        ws = getattr(self, "workspace", None)
-        if ws is None or not ws.isVisible():
+
+
+class SideBox(QFrame):
+    """左栏卡框：背景与描边自己画，k 只控制背景层透明度（内容不受影响）。
+
+    为什么要自己画：给整块面板挂 QGraphicsOpacityEffect 会把里面的两个
+    QScrollArea 每帧离屏渲染一遍，动画直接卡；只让背景层变色则几乎零成本。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._k = 1.0
+        self.setAttribute(Qt.WA_StyledBackground, False)
+
+    def get_k(self):
+        return self._k
+
+    def set_k(self, v):
+        v = max(0.0, min(1.0, float(v)))
+        if abs(v - self._k) < 1e-4:
             return
-        g = ws.geometry()
-        if g.width() <= 0 or g.height() <= 0:
-            return
-        if self._shadow is None or self._shadow_size != (g.width(), g.height()):
-            self._shadow = self._make_shadow(g.width(), g.height())
-            self._shadow_size = (g.width(), g.height())
-        p.drawPixmap(g.x() - self.PAD, g.y() - self.PAD, self._shadow)
+        self._k = v
+        self.update()
+
+    k = Property(float, get_k, set_k)
+
+    def paintEvent(self, _ev):
+        # 不画底色：左栏直接坐在窗口底色上（用户要求去掉那一层白）
+        return
 
 
 class _PreviewSignals(QObject):
@@ -173,6 +210,108 @@ def row(*widgets, spacing=8):
     return lay
 
 
+
+class GroupRow(QFrame):
+    """左栏的组行：左边展开箭头、中间组名与参数、右边张数；悬停时加底色和一层淡投影。"""
+
+    clicked = Signal(str)
+    menu_requested = Signal(str, object)
+
+    H = 46
+
+    def __init__(self, group: Group):
+        super().__init__()
+        self.gid = group.gid
+        self.setObjectName("groupRow")
+        self.setFixedHeight(self.H)
+        self.setCursor(Qt.PointingHandCursor)
+        self._hover = False
+        self._active = False
+        self._open = False
+        self._title = ""
+        self._meta = ""
+        self._count = 0
+        self.set(group)
+
+    def set(self, group: Group):
+        um = group.umpp()
+        self._title = (group.title or "").split(" · ")[0] or group.title
+        self._count = int(group.count)
+        self._meta = "%s µm/px · %d 张" % (
+            ("%g" % round(um, 4)) if um else "未标定", self._count)
+        self.setToolTip("")
+        self.update()
+
+    def set_active(self, on):
+        self._active = bool(on)
+        self.update()
+
+    def set_open(self, on):
+        self._open = bool(on)
+        self.update()
+
+    def enterEvent(self, ev):
+        self._hover = True
+        self.update()
+        super().enterEvent(ev)
+
+    def leaveEvent(self, ev):
+        self._hover = False
+        self.update()
+        super().leaveEvent(ev)
+
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.LeftButton:
+            self.clicked.emit(self.gid)
+        elif ev.button() == Qt.RightButton:
+            self.menu_requested.emit(self.gid, ev.globalPosition().toPoint())
+        ev.accept()
+
+    def paintEvent(self, _ev):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setRenderHint(QPainter.TextAntialiasing, True)
+        r = QRectF(self.rect()).adjusted(0.5, 2.5, -1.5, -2.5)
+
+        if self._hover:
+            # 悬停只加一层底色（之前画了 3 圈投影，看起来像双层阴影）
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(theme.FIELD_HOVER))
+            p.drawRoundedRect(r, 8, 8)
+
+        # 展开/收起箭头
+        cx, cy = 12.0, self.height() / 2.0
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(theme.INK2))
+        if self._open:
+            p.drawPolygon(QPolygonF([QPointF(cx - 4, cy - 2), QPointF(cx + 4, cy - 2),
+                                     QPointF(cx, cy + 3)]))
+        else:
+            p.drawPolygon(QPolygonF([QPointF(cx - 2, cy - 4), QPointF(cx + 3, cy),
+                                     QPointF(cx - 2, cy + 4)]))
+
+        # 组名
+        f = QFont(self.font())
+        f.setPixelSize(12)
+        f.setBold(self._active)
+        p.setFont(f)
+        p.setPen(QColor(theme.PRIMARY) if self._active else QColor(theme.TEXT))
+        title = p.fontMetrics().elidedText(self._title, Qt.ElideRight,
+                                           int(self.width() - 46))
+        p.drawText(QRectF(22, 4, self.width() - 46, 20),
+                   Qt.AlignLeft | Qt.AlignVCenter, title)
+
+        # 第二行
+        f2 = QFont(self.font())
+        f2.setPixelSize(11)
+        p.setFont(f2)
+        p.setPen(QColor(theme.MUTED))
+        meta = p.fontMetrics().elidedText(self._meta, Qt.ElideRight,
+                                          int(self.width() - 22))
+        p.drawText(QRectF(22, 23, self.width() - 22, 18),
+                   Qt.AlignLeft | Qt.AlignVCenter, meta)
+
+
 class GroupCard(QFrame):
     clicked = Signal(str)
     menu_requested = Signal(str, object)
@@ -200,7 +339,8 @@ class GroupCard(QFrame):
 
     def set(self, group: Group):
         um = group.umpp()
-        self._t = group.title
+        # 左栏只有 132px：第一行只放「组 N」，µm/px 与张数放第二行，避免被省略号吃掉
+        self._t = group.title if getattr(group, "title_manual", False) else group.title.split(" · ")[0]
         self._m = "%s µm/px · %d 张" % (("%g" % round(um, 4)) if um else "未标定", group.count)
         self._elide()
 
@@ -516,69 +656,99 @@ class CropToggleButton(QPushButton):
                   QColor("#2E7D78"))
 
 
-class FileRow(QPushButton):
-    """组内图片：一行一个文件名（右键：删除 / 移动到其他组）。"""
+class FileRow(QFrame):
+    """组内图片：一行一张，左边缩略图、右边文件名（右键：删除 / 移动到其他组）。"""
 
+    clicked = Signal(str)
     menu_requested = Signal(str, object)
+
+    H = 42
+    TH = 30
 
     def __init__(self, item, parent=None):
         super().__init__(parent)
         self.item = item
         self.setObjectName("fileRow")
         self.setCursor(Qt.PointingHandCursor)
-        self.setText(os.path.basename(item.path))
+        self.setFixedHeight(self.H)
         self.setToolTip(item.path)
-        # 横向 Ignored：允许被压到可视区宽度，省略号才会生效（否则按文字宽度撑开、右侧被裁）
-        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
-        self.setMinimumWidth(0)
-        self.setMinimumHeight(24)
-        self.setProperty("active", False)
-        self._full = os.path.basename(item.path)
+        self._active = False
+        self._hover = False
+        self._thumb: QPixmap | None = None
+        self._name = os.path.basename(item.path)
 
-    def _elide(self):
-        fm = self.fontMetrics()
-        self.setText(fm.elidedText(self._full, Qt.ElideRight,
-                                   max(16, self.width() - 6)))
-
-    def resizeEvent(self, ev):
-        super().resizeEvent(ev)
-        self._elide()
-
-    def showEvent(self, ev):
-        super().showEvent(ev)
-        self._elide()
+    def set_thumb(self, pix):
+        if pix is None:
+            return
+        if isinstance(pix, QPixmap):
+            self._thumb = pix
+        else:
+            self._thumb = QPixmap(pix)
+        self.update()
 
     def set_active(self, on):
-        self.setProperty("active", bool(on))
-        st = self.style()
-        st.unpolish(self)
-        st.polish(self)
+        self._active = bool(on)
         self.update()
+
+    def enterEvent(self, ev):
+        self._hover = True
+        self.update()
+        super().enterEvent(ev)
+
+    def leaveEvent(self, ev):
+        self._hover = False
+        self.update()
+        super().leaveEvent(ev)
+
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.LeftButton:
+            self.clicked.emit(self.item.path)
+        elif ev.button() == Qt.RightButton:
+            self.menu_requested.emit(self.item.path, ev.globalPosition().toPoint())
+        ev.accept()
 
     def contextMenuEvent(self, ev):
         self.menu_requested.emit(self.item.path, ev.globalPos())
 
-    # 兼容旧缩略图接口
-    def set_thumb(self, _p):
-        pass
+    def paintEvent(self, _ev):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        r = QRectF(self.rect()).adjusted(0.5, 1.5, -1.5, -1.5)
 
-    def set_meta(self, _it):
-        pass
+        if self._hover:
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(theme.FIELD_HOVER))
+            p.drawRoundedRect(r, 6, 6)
 
-    def warn(self, _on):
-        pass
+        # 缩略图：居中裁成正方形，圆角
+        t = QRectF(4, (self.height() - self.TH) / 2.0, self.TH, self.TH)
+        path = QPainterPath()
+        path.addRoundedRect(t, 5, 5)
+        p.save()
+        p.setClipPath(path)
+        if self._thumb is not None and not self._thumb.isNull():
+            pm = self._thumb.scaled(int(self.TH * 2), int(self.TH * 2),
+                                    Qt.KeepAspectRatioByExpanding,
+                                    Qt.SmoothTransformation)
+            src = QRectF((pm.width() - self.TH * 2) / 2.0, (pm.height() - self.TH * 2) / 2.0,
+                         self.TH * 2, self.TH * 2)
+            p.drawPixmap(t, pm, src)
+        else:
+            p.setBrush(QColor(theme.FIELD))
+            p.setPen(Qt.NoPen)
+            p.drawRoundedRect(t, 5, 5)
+        p.restore()
 
-
-
-_WS_THICKFRAME = 0x00040000
-_WS_MAXIMIZEBOX = 0x00010000
-_WS_MINIMIZEBOX = 0x00020000
-_WS_SYSMENU = 0x00080000
-_GWL_STYLE = -16
-_SWP_NOMOVE = 0x0002
-_SWP_NOSIZE = 0x0001
-_SWP_NOZORDER = 0x0004
-_SWP_FRAMECHANGED = 0x0020
+        # 文件名
+        f = QFont(self.font())
+        f.setPixelSize(11)
+        p.setFont(f)
+        p.setPen(QColor(theme.TEXT))
+        fm = p.fontMetrics()
+        name = fm.elidedText(self._name, Qt.ElideMiddle, int(self.width() - self.TH - 18))
+        p.drawText(QRectF(self.TH + 12, 0, self.width() - self.TH - 16, self.height()),
+                   Qt.AlignLeft | Qt.AlignVCenter, name)
 
 
 class _RECT(ctypes.Structure):
@@ -610,6 +780,18 @@ def _install_native_frame(win, border=6):
 
 
 # ------------------------------------------------------------------ 主窗口
+# Win32 常量（之前被误删，导致 _install_native_frame 静默失败：窗口没有 WS_THICKFRAME，
+# 于是既不能拖标题栏，也不能拖边框缩放 —— 用户 2026-11-05 实测反馈）
+_GWL_STYLE = -16
+_WS_THICKFRAME = 0x00040000
+_WS_MAXIMIZEBOX = 0x00010000
+_WS_MINIMIZEBOX = 0x00020000
+_WS_SYSMENU = 0x00080000
+_SWP_NOSIZE = 0x0001
+_SWP_NOMOVE = 0x0002
+_SWP_NOZORDER = 0x0004
+_SWP_FRAMECHANGED = 0x0020
+
 _FRAMELESS = True          # 无边框窗口 + 自绘标题栏
 _HT = dict(client=1, caption=2, left=10, right=11, top=12, topleft=13,
            topright=14, bottom=15, bottomleft=16, bottomright=17)
@@ -687,6 +869,7 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(720, 520)
         self.resize(1320, 880)
         self._build()
+        self._flatten_right_bg()
         # 恢复上次的左右栏展开状态
         self.left_holder.setVisible(self.settings.ui_left)
         self.set_right_collapsed(not self.settings.ui_right, remember=False)
@@ -762,7 +945,7 @@ class MainWindow(QMainWindow):
         wl.addWidget(self.right_holder, 0)
 
         mid.addWidget(self.left_holder, 0)
-        body.workspace = self.workspace          # 让 BodyWidget 知道画谁的投影
+        body.set_panel(self.workspace)           # 让 BodyWidget 知道画谁的投影
         mid.addWidget(self.workspace, 1)
         outer.addLayout(mid, 1)
 
@@ -813,11 +996,11 @@ class MainWindow(QMainWindow):
         lay.setSpacing(10)
 
         mark = QLabel()
-        # 标题栏图标：黑白线条显微镜（assets/icon_line_44.png，2x 供高分屏）
+        # 标题栏图标：透明底的 C 形标记（白底圆角图标留给桌面/任务栏，标题栏上白块反而难看）
         mark.setFixedSize(22, 22)
-        _icon = os.path.join(paths.ROOT, "assets", "icon_line_44.png")
+        _icon = os.path.join(paths.ROOT, "assets", "icon_mark.png")
         if not os.path.exists(_icon):
-            _icon = os.path.join(paths.ROOT, "assets", "icon_line.png")
+            _icon = os.path.join(paths.ROOT, "assets", "icon_line_44.png")
         _pm = QPixmap(_icon)
         if not _pm.isNull():
             if _pm.width() > 44:
@@ -915,21 +1098,9 @@ class MainWindow(QMainWindow):
             except Exception:                        # noqa: BLE001
                 pass
             if msg.message == 0x0083:                       # WM_NCCALCSIZE
-                # 客户区 = 整窗：加了 WS_THICKFRAME 也不出现系统边框；
-                # 但「最大化」要按系统边框内缩，否则会盖住任务栏、四周被切
-                if msg.wParam:
-                    hwnd = int(self.winId())
-                    u = ctypes.windll.user32
-                    try:
-                        if u.IsZoomed(hwnd):
-                            par = _NCCALCSIZE_PARAMS.from_address(int(msg.lParam))
-                            pad = u.GetSystemMetrics(32) + u.GetSystemMetrics(92)
-                            par.rgrc[0].left += pad
-                            par.rgrc[0].top += pad
-                            par.rgrc[0].right -= pad
-                            par.rgrc[0].bottom -= pad
-                    except Exception:                # noqa: BLE001
-                        pass
+                # 客户区 = 整窗：加了 WS_THICKFRAME 也不出现系统边框。
+                # 注意：最大化时**不能**再按系统边框内缩 —— 实测 GetWindowRect 已经等于工作区，
+                # 再内缩就会在四周留出一条窗口底色，看起来就是「漏了一圈边框」（用户实测反馈）。
                 return True, 0
             if msg.message == 0x0084:                       # WM_NCHITTEST
                 x = ctypes.c_short(msg.lParam & 0xFFFF).value
@@ -973,114 +1144,212 @@ class MainWindow(QMainWindow):
         """左栏只有一列：图标在上；点「分组」时内容在图标正下方展开、设置之前，不是另开一页。"""
         wrap = QFrame()
         wrap.setObjectName("leftWrap")
-        wrap.setFixedWidth(76)
+        wrap.setFixedWidth(46)
+        self._left_wrap = wrap
         col = QVBoxLayout(wrap)
-        col.setContentsMargins(2, 8, 2, 8)
+        col.setContentsMargins(0, 8, 0, 8)
         col.setSpacing(2)
 
         self._rail = {}
         for key, text in (("import", "导入"), ("group", "分组")):
             b = RailButton(key, text)
             b.clicked.connect(lambda _c=False, k=key: self.on_rail(k))
+            if key == "group":
+                b.setContextMenuPolicy(Qt.CustomContextMenu)
+                b.customContextMenuRequested.connect(
+                    lambda _p, _b=b: self.group_rail_menu(_b.mapToGlobal(_p)))
             if key == "import":
                 b.setCheckable(False)       # 动作型按钮，不要留灰色勾选底
                 b.setToolTip("导入图片文件（可多选）；右键导入整个采集目录")
                 b.setContextMenuPolicy(Qt.CustomContextMenu)
                 b.customContextMenuRequested.connect(
                     lambda _p: self.import_folder())
-            col.addWidget(b, 0, Qt.AlignLeft)
+            b.setFixedWidth(44)
+            col.addWidget(b, 0, Qt.AlignHCenter)
             self._rail[key] = b
 
-        # —— 展开区：紧贴在「分组」下面 ——
+        # —— 展开区：一个框，里面是一棵「组 → 组内图片」的树（点组展开） ——
         panel = QWidget()
         panel.setObjectName("groupPanel")
         lay = QVBoxLayout(panel)
-        lay.setContentsMargins(0, 6, 0, 4)
-        lay.setSpacing(6)
+        lay.setContentsMargins(0, 0, 0, 4)
+        lay.setSpacing(0)
+
+        box = SideBox()
+        box.setObjectName("sideBox")
+        bv = QVBoxLayout(box)
+        bv.setContentsMargins(4, 6, 4, 6)
+        bv.setSpacing(0)
 
         self.group_host = QWidget()
         self.group_host.setObjectName("groupHost")
         self.group_host.setAutoFillBackground(False)
-        self.group_layout = QVBoxLayout(self.group_host)
-        self.group_layout.setContentsMargins(0, 0, 0, 0)
-        self.group_layout.setSpacing(4)
-        self.group_layout.addStretch(1)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(self.group_host)
-        scroll.setFrameShape(QFrame.NoFrame)
-        gvp = scroll.viewport()
-        gvp.setObjectName("groupVp")
-        gvp.setAutoFillBackground(False)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll.setStyleSheet("#groupVp, #groupHost { background: transparent; }")
-        scroll.setMinimumHeight(90)
-        lay.addWidget(scroll, 1)
+        self.tree_layout = QVBoxLayout(self.group_host)
+        self.tree_layout.setContentsMargins(0, 0, 0, 0)
+        self.tree_layout.setSpacing(1)
 
-        b_new = SweepButton("+Group")
-        b_new.setFixedWidth(64)
-        b_new.setToolTip("新建一个分组")
-        b_new.clicked.connect(self.new_group)
-        lay.addWidget(b_new, 0, Qt.AlignHCenter)
-
-        # 「标定」块已按要求删除；计数仍会更新，但不再显示
-        self.lbl_src = QLabel("")
-        self.lbl_src.setObjectName("railSub")
-        self.lbl_src.setVisible(False)
-        self.btn_calib = None
-
-        cap2 = QLabel("组内图片")
-        cap2.setObjectName("railCap")
-        cap2.setAlignment(Qt.AlignCenter)
-        lay.addWidget(cap2)
+        # 组内图片行：由 _arrange_tree 插到「展开的那个组」下面，跟着同一根滚动条走
         self.file_host = QWidget()
         self.file_host.setObjectName("fileHost")
         self.file_host.setAutoFillBackground(False)
         self.strip_layout = QVBoxLayout(self.file_host)
-        self.strip_layout.setContentsMargins(0, 0, 0, 0)
-        self.strip_layout.setSpacing(2)
+        self.strip_layout.setContentsMargins(14, 2, 0, 6)
+        self.strip_layout.setSpacing(1)
         self.strip_layout.addStretch(1)
-        fscroll = QScrollArea()
-        fscroll.setObjectName("fileScroll")
-        fscroll.setWidgetResizable(True)
-        fscroll.setWidget(self.file_host)
-        fscroll.setFrameShape(QFrame.NoFrame)
-        fscroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        fscroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        fvp = fscroll.viewport()
-        fvp.setObjectName("fileVp")
-        fvp.setAutoFillBackground(False)
-        fscroll.setStyleSheet("#fileVp, #fileHost { background: transparent; }")
-        fscroll.setMinimumHeight(80)
-        lay.addWidget(fscroll, 1)
         self.strip_host = self.file_host          # 兼容旧名字
+
+        scroll = QScrollArea()
+        scroll.setObjectName("groupScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(self.group_host)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        gvp = scroll.viewport()
+        gvp.setObjectName("groupVp")
+        gvp.setAutoFillBackground(False)
+        scroll.setStyleSheet("#groupVp, #groupHost, #fileHost { background: transparent; }")
+        bv.addWidget(scroll, 1)
+        lay.addWidget(box, 1)
+        self._group_scroll = scroll
+        self._tree_open = True          # 组默认展开（点一下收起）
+        self._expanded_gid = None
+        self.group_layout = self.tree_layout          # 兼容旧名字
+
 
 
         panel.hide()
-        col.addWidget(panel, 1)
+        panel.setFixedWidth(0)
         self._left_stretch = col.count()
-        col.addStretch(1)                      # 收起时把「设置」顶到底部
+        col.addStretch(1)                      # 把「设置」顶到底部
 
         b_set = RailButton("settings", "设置")
+        b_set.setFixedWidth(44)
         b_set.setCheckable(False)
         b_set.clicked.connect(self.project_menu)
-        col.addWidget(b_set, 0, Qt.AlignLeft)
+        col.addWidget(b_set, 0, Qt.AlignHCenter)
         self._rail_settings = b_set
 
         # 导出：只留图标，放在「设置」下面（底栏已删除）
         col.addSpacing(2)
         b_dl = RailButton("export", "导出")
+        b_dl.setFixedWidth(44)
         b_dl.setCheckable(False)
         b_dl.setToolTip("导出：先勾要导出的图片，再勾导出内容")
         b_dl.clicked.connect(self.export_menu)
-        col.addWidget(b_dl, 0, Qt.AlignLeft)
+        col.addWidget(b_dl, 0, Qt.AlignHCenter)
         self._rail_download = b_dl
 
         self.setAcceptDrops(True)
         self.group_panel = panel
         self.left_col = col
-        self._left_stretch = col.count() - 2   # 面板之后那个 stretch
-        return wrap
+
+        # 左栏 = [46px 图标列][分组面板]：面板就在左栏里向右展开，不浮在画布上
+        left = QWidget()
+        left.setObjectName("leftArea")
+        hl = QHBoxLayout(left)
+        hl.setContentsMargins(0, 0, 0, 0)
+        hl.setSpacing(6)
+        hl.addWidget(wrap, 0)
+        hl.addWidget(panel, 0)
+        hl.addStretch(1)
+        self._left_rail = wrap
+        return left
+
+    def _place_group_panel(self):
+        """面板现在挂在左栏里，跟着布局走，不需要手动定位。"""
+
+    def _set_group_panel(self, vis, animate=True):
+        """点「分组」：左栏向右展开 168px，两块卡框就在左栏里（不浮在画布上）。"""
+        panel = getattr(self, "group_panel", None)
+        if panel is None:
+            return
+        btn = getattr(self, "_rail", {}).get("group")
+        if btn is not None:
+            btn.setChecked(vis)
+
+        def finish():
+            if not vis:
+                panel.hide()
+            body = getattr(self, "_body", None)
+            if body is not None:
+                QTimer.singleShot(0, body.update)
+
+        if not hasattr(self, "_panel_width_anim"):
+            self._panel_width_anim = QVariantAnimation(self)
+            self._panel_width_anim.setDuration(150)     # 展开/收起 150ms（帧成本降下来后可以丝滑）
+            self._panel_width_anim.setEasingCurve(QEasingCurve.OutCubic)
+            self._panel_width_anim.valueChanged.connect(
+                lambda v: self.group_panel.setFixedWidth(int(round(v))))
+            self._panel_width_anim.finished.connect(
+                lambda: self._panel_finish and self._panel_finish())
+
+        self._panel_finish = finish
+
+        if vis:
+            panel.show()
+            for b in self._box_widgets():
+                b.set_k(0.0)
+            self._anim_box_bg(1.0, 55)
+            start_w, end_w = panel.width(), 168
+        else:
+            self._anim_box_bg(0.0, 55)
+            start_w, end_w = panel.width(), 0
+
+        # 宽度动画：投影已经去掉，每帧只剩铺底色，60fps 跑得动
+        self._panel_width_anim.stop()
+        self._panel_width_anim.setStartValue(float(start_w))
+        self._panel_width_anim.setEndValue(float(end_w))
+        self._panel_width_anim.start()
+
+    def _box_widgets(self):
+        return [b for b in self.group_panel.findChildren(SideBox)] if \
+            getattr(self, "group_panel", None) is not None else []
+
+    def _anim_box_bg(self, to, ms):
+        """只对两个卡框的背景层做透明度动画（120ms），内容不动。"""
+        boxes = self._box_widgets()
+        if not boxes:
+            return
+        if not hasattr(self, "_box_anim"):
+            self._box_anim = QVariantAnimation(self)
+            self._box_anim.setEasingCurve(QEasingCurve.OutCubic)
+            self._box_anim.valueChanged.connect(
+                lambda v: [b.set_k(float(v)) for b in self._box_widgets()])
+        self._box_anim.stop()
+        self._box_anim.setDuration(int(ms))
+        self._box_anim.setStartValue(float(boxes[0].get_k()))
+        self._box_anim.setEndValue(float(to))
+        self._box_anim.start()
+
+    def _panel_opacity_effect(self):
+        eff = getattr(self, "_panel_op", None)
+        if eff is None:
+            eff = QGraphicsOpacityEffect(self.group_panel)
+            eff.setOpacity(1.0)
+            self.group_panel.setGraphicsEffect(eff)
+            self._panel_op = eff
+        return eff
+
+    def _set_panel_opacity(self, v):
+        try:
+            self._panel_opacity_effect().setOpacity(float(v))
+        except Exception:                        # noqa: BLE001
+            pass
+
+    def _anim_panel_opacity(self, to, ms):
+        try:
+            eff = self._panel_opacity_effect()
+            if not hasattr(self, "_panel_anim"):
+                self._panel_anim = QPropertyAnimation(eff, b"opacity", self)
+                self._panel_anim.setEasingCurve(QEasingCurve.OutCubic)
+            self._panel_anim.stop()
+            self._panel_anim.setDuration(int(ms))
+            self._panel_anim.setStartValue(float(eff.opacity()))
+            self._panel_anim.setEndValue(float(to))
+            self._panel_anim.start()
+        except Exception:                        # noqa: BLE001
+            pass
 
     def on_rail(self, key):
         """左栏导航：导入 / 分组弹出面板 / 其余切右栏标签。"""
@@ -1088,12 +1357,7 @@ class MainWindow(QMainWindow):
             self.import_files()         # 左键：选单个/多个文件；右键：选采集目录
             return
         if key == "group":
-            vis = not self.group_panel.isVisible()
-            self._rail["group"].setChecked(vis)
-            self.group_panel.setVisible(vis)
-            if hasattr(self, "left_col"):
-                self.left_col.setStretch(self._left_stretch, 0 if vis else 1)
-            self.left_holder.updateGeometry()
+            self._set_group_panel(not self.group_panel.isVisible())
             return
         mapping = {"crop": "crop", "ruler": "ruler", "channel": "channel",
                    "roi": "measure", "process": "process"}
@@ -1271,6 +1535,24 @@ class MainWindow(QMainWindow):
         "measure": ("ROI 与测量",),
     }
 
+    def _flatten_right_bg(self):
+        """右栏里所有「纯 QWidget 容器」不画底色（全局 QWidget 规则会切出一块块灰底）。
+
+        只处理 type 恰好是 QWidget 的：按钮、输入框、标签各自有样式，不动。
+        """
+        holder = getattr(self, "right_holder", None)
+        if holder is None:
+            return
+        for w in holder.findChildren(QWidget):
+            if type(w) is not QWidget:
+                continue
+            w.setProperty("flat", True)          # 交给 QSS: QWidget[flat="true"] 透明
+            w.setAttribute(Qt.WA_StyledBackground, False)
+            w.setAutoFillBackground(False)
+            st = w.style()
+            st.unpolish(w)
+            st.polish(w)
+
     def _build_right(self):
         """右栏：标签条 + 行式属性（卡片作为分区，只在当前标签可见）。"""
         from ui.cards import calib as calib_card
@@ -1433,18 +1715,9 @@ class MainWindow(QMainWindow):
         if body is not None:
             body.update()
 
-    def _place_group_panel(self):
-        """旧接口保留为空实现（面板现在就在布局里，不再定位）。"""
-
     def close_group_panel(self):
-        p = getattr(self, "group_panel", None)
-        if p is not None and p.isVisible():
-            p.hide()
-            if hasattr(self, "left_col"):
-                self.left_col.setStretch(self._left_stretch, 1)
-        btn = getattr(self, "_rail", {}).get("group")
-        if btn is not None:
-            btn.setChecked(False)
+        if getattr(self, "group_panel", None) is not None and self.group_panel.isVisible():
+            self._set_group_panel(False)
 
     def _place_title_seg(self):
         """让标题栏里的视图切换正好停在「中间栏」右边缘的正上方。"""
@@ -1530,8 +1803,11 @@ class MainWindow(QMainWindow):
         st.bar_text_offset = int(_tg.value()) if _tg is not None else 0
         st.export_zoom = [1, 2, 4][self.cb_zoom.currentIndex()]
         st.bar_extra_png = self.chk_bar_png.isChecked()
-        st.exp_merge = self.chk_merge.isChecked()
-        st.exp_ch = [c.isChecked() for c in self.chk_ch]
+        mode = getattr(self, "exp_mode", None) or getattr(st, "exp_mode", "both")
+        st.exp_mode = mode
+        st.exp_merge = mode in ("merge", "both")
+        # 逐通道：勾 4 路够用了（实际按每张图的通道数取前 N 个）
+        st.exp_ch = [mode in ("channels", "both")] * 4
         st.merge_mode = "max" if self.cb_merge_mode.currentIndex() == 1 else "add"
         st.out_format = ["follow", "png", "tiff", "jpg"][self.cb_format.currentIndex()]
         st.out_suffix = self.ed_suffix.text() or "_crop"
@@ -1876,8 +2152,17 @@ class MainWindow(QMainWindow):
         self.refresh_strip()
         self.refresh_manifest()
         self.progress.setValue(0)
-        self.lbl_status.setText("已导入 %d 张（共 %d 张，%d 组）"
-                                % (len(added), len(self.items), len(self.groups)))
+        failed = len(getattr(loader, "_LIF_FAILED", []) or [])
+        msg = "已导入 %d 张（共 %d 张，%d 组）" % (len(added), len(self.items), len(self.groups))
+        if failed:
+            msg += "　⚠ %d 个序列读取失败（已跳过，详见日志）" % failed
+            try:
+                import logging
+                for e in loader._LIF_FAILED[:20]:
+                    logging.warning("LIF 序列读取失败: %s", e)
+            except Exception:                    # noqa: BLE001
+                pass
+        self.lbl_status.setText(msg)
         self._mark_dirty()
         self.start_thumbnails()
         self._auto_show_after_import()
@@ -1887,18 +2172,13 @@ class MainWindow(QMainWindow):
         if not getattr(self, "groups", None):
             return
         # ① 面板总是展开 —— 用户要的是「导入完就能看见分组」，不是再点一下
-        panel = getattr(self, "group_panel", None)
-        if panel is not None and not panel.isVisible():
-            self._rail["group"].setChecked(True)
-            panel.setVisible(True)
-            if hasattr(self, "left_col"):
-                self.left_col.setStretch(self._left_stretch, 0)
-            if hasattr(self, "left_holder"):
-                self.left_holder.updateGeometry()
-        # ② 已经有选中（追加导入）就不动用户的位置
-        if self.cur_group is not None and self.cur_item is not None:
+        if not self.group_panel.isVisible():
+            self._set_group_panel(True)
+        # ② 选「图片最多的那一组」（一个 LIF 常按倍率散成好几组，别落在只有 2 张的小组上）
+        g = max(self.groups, key=lambda x: len(getattr(x, "images", []) or []))
+        if (self.cur_group is not None and self.cur_item is not None
+                and self.cur_group is g):
             return
-        g = self.groups[0]
         self.select_group(g.gid)
         if self.cur_item is None and getattr(g, "images", None):
             self.select_item(g.images[0].path)
@@ -2000,6 +2280,41 @@ class MainWindow(QMainWindow):
             self.cur_group = live
             self.select_group(live.gid)
 
+    def _arrange_tree(self):
+        """按当前展开状态重排：组行 + （展开的组）组内图片行。"""
+        lay = getattr(self, "tree_layout", None)
+        if lay is None:
+            return
+        while lay.count():
+            it = lay.takeAt(0)
+            w = it.widget()
+            if w is not None:
+                w.hide()                          # 先全部藏起来，下面按需显示
+        opened = None
+        if getattr(self, "_tree_open", True) and self.cur_group is not None:
+            opened = self.cur_group.gid
+        self._expanded_gid = opened
+        for g in self.groups:
+            row = self._group_cards.get(g.gid)
+            if row is None:
+                continue
+            row.set_open(opened == g.gid)
+            row.show()
+            lay.addWidget(row)
+            if opened == g.gid:
+                self.file_host.show()
+                lay.addWidget(self.file_host)
+        lay.addStretch(1)
+
+    def _on_group_clicked(self, gid):
+        """点组：选中 + 展开/收起（再点一次收起）。"""
+        if self.cur_group is not None and self.cur_group.gid == gid:
+            self._tree_open = not getattr(self, "_tree_open", True)
+        else:
+            self._tree_open = True
+        self._expanded_gid = gid if getattr(self, "_tree_open", True) else None
+        self.select_group(gid)
+
     def refresh_groups(self):
         while self.group_layout.count() > 1:
             item = self.group_layout.takeAt(0)
@@ -2012,16 +2327,18 @@ class MainWindow(QMainWindow):
         if hint is not None:
             hint.setVisible(not self.groups)
         for g in self.groups:
-            gc = GroupCard(g)
-            gc.clicked.connect(self.select_group)
+            gc = GroupRow(g)
+            gc.clicked.connect(self._on_group_clicked)
             gc.menu_requested.connect(self.group_menu)
             gc.set_active(bool(self.cur_group and g.gid == self.cur_group.gid))
-            self.group_layout.insertWidget(self.group_layout.count() - 1, gc)
             self._group_cards[g.gid] = gc
-        n_oib = sum(1 for it in self.items if "内嵌" in it.calib)
-        n_bar = sum(1 for it in self.items if "标尺" in it.calib)
-        n_man = sum(1 for it in self.items if "手动" in it.calib)
-        self.lbl_src.setText("自带%d · 识别%d\n手动%d" % (n_oib, n_bar, n_man))
+        self._arrange_tree()
+        lbl = getattr(self, "lbl_src", None)          # 老 UI 的统计标签，现在可能不存在
+        if lbl is not None:
+            n_oib = sum(1 for it in self.items if "内嵌" in it.calib)
+            n_bar = sum(1 for it in self.items if "标尺" in it.calib)
+            n_man = sum(1 for it in self.items if "手动" in it.calib)
+            lbl.setText("自带%d · 识别%d\n手动%d" % (n_oib, n_bar, n_man))
 
     def select_group(self, gid):
         for g in self.groups:
@@ -2085,11 +2402,13 @@ class MainWindow(QMainWindow):
             return
         for it in self.cur_group.images:
             row = FileRow(it)
-            row.clicked.connect(lambda _c=False, p=it.path: self.select_item(p))
+            row.set_thumb(getattr(self, "_thumbs", {}).get(it.path))
+            row.clicked.connect(self.select_item)
             row.menu_requested.connect(self.thumb_menu)
             row.set_active(bool(self.cur_item and it.path == self.cur_item.path))
             self.strip_layout.insertWidget(self.strip_layout.count() - 1, row)
             self._thumb_buttons[it.path] = row
+        self._arrange_tree()          # 行数变化后，把树重新摆一次
 
     def select_item(self, path):
         it = next((x for x in self.items if x.path == path), None)
@@ -4287,9 +4606,21 @@ class MainWindow(QMainWindow):
         self.refresh_manifest()
         self.lbl_status.setText("已按选中的候选标定 %g µm/px" % it.umpp)
 
+    def set_export_mode(self, mode):
+        """导出内容三选一：merge / channels / both。"""
+        if mode not in ("merge", "channels", "both"):
+            return
+        self.exp_mode = mode
+        for k, b in getattr(self, "pill_exp", {}).items():
+            b.blockSignals(True)
+            b.setChecked(k == mode)
+            b.blockSignals(False)
+        self.settings.exp_mode = mode
+        self.on_any_setting()
+        self.refresh_manifest()
+
     def refresh_manifest(self):
         st = self._sync_settings()
-        variants = (1 if st.exp_merge else 0) + sum(1 for x in st.exp_ch if x)
         lines, total, skipped = [], 0, 0
         raw_bits = set()
         for g in self.groups:
@@ -4304,7 +4635,7 @@ class MainWindow(QMainWindow):
                     continue
                 nf = len(self._frames_for(it))
                 shots += nf
-                files += nf * variants        # 彩图
+                files += nf * render.variant_count(it, st)   # 彩图（按实际通道数）
                 if st.exp_raw_single:         # 原始位深：逐通道，不受 CH1~CH3 勾选限制
                     files += nf * max(1, len(it.channels))
                     raw_bits.add(int(getattr(it, "bits", 8) or 8))
@@ -5032,6 +5363,23 @@ class MainWindow(QMainWindow):
         self.lbl_status.setText("参数已保存：" + path)
 
     # ------------------------------------------------------------ 分组管理
+    def group_rail_menu(self, pos=None):
+        """右键左侧「分组」图标：新建分组 / 展开收起。
+
+        注意：不能叫 group_menu —— 那个名字已经被「组卡片右键菜单」占用（gid, pos），
+        同名会互相覆盖（这次就踩了一次）。
+        """
+        m = QMenu(self)
+        act = m.addAction("新建分组")
+        act.triggered.connect(lambda _checked=False: self.new_group())
+        m.addSeparator()
+        panel = getattr(self, "group_panel", None)
+        opened = panel is not None and panel.isVisible()
+        act2 = m.addAction("收起分组面板" if opened else "展开分组面板")
+        act2.triggered.connect(
+            lambda _checked=False: self._set_group_panel(not opened))
+        m.exec(pos if pos is not None else QCursor.pos())
+
     def new_group(self):
         self._commit("新建组")
         n = len(self.groups) + 1

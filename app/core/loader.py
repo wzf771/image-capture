@@ -454,11 +454,92 @@ def _lif_pick(ims):
     return max(ims, key=area)
 
 
-def _probe_lif(path, item, index=None):
-    """徕卡 LIF/LOF/XLIF 等：像素、通道、帧数、标定（坐标值单位是米）。"""
+_LIF_FAILED = []          # 最近一次 LIF 导入里读失败的序列
+_LUT_COLORS = {"blue": BLUE, "green": GREEN, "red": RED, "gray": GRAY, "grey": GRAY,
+               "cyan": CYAN, "magenta": MAGENTA, "yellow": YELLOW}
+
+
+def _lif_channel_dicts(im, nch, maxv):
+    """从 LIF 的 HardwareSetting / ViewerScaling 里读每一路：LUT 颜色、染料、波段、黑白场。
+
+    LIF 的通道信息藏在两处（2026-11 实测）：
+      HardwareSetting.ATLConfocalSettingDefinition
+        .LUT_List.LUT[]      → Channel / LutName（Blue/Green/Red/Gray）
+        .Spectro.MultiBand[] → Channel / DyeName / TargetWaveLengthBegin/End
+      ViewerScaling.ChannelScalingInfo[] → 每路 BlackValue / WhiteValue（0~1）
+    """
+    attrs = getattr(im, "attrs", {}) or {}
+    hw = (attrs.get("HardwareSetting") or {}).get("ATLConfocalSettingDefinition") or {}
+    lut = {}
+    for it in ((hw.get("LUT_List") or {}).get("LUT") or []):
+        try:
+            lut[int(it.get("Channel"))] = str(it.get("LutName") or "")
+        except Exception:                        # noqa: BLE001
+            pass
+    bands = {}
+    for mb in ((hw.get("Spectro") or {}).get("MultiBand") or []):
+        try:
+            bands[int(mb.get("Channel"))] = mb
+        except Exception:                        # noqa: BLE001
+            pass
+    scaling = (attrs.get("ViewerScaling") or {}).get("ChannelScalingInfo") or []
+    out = []
+    for i in range(nch):
+        cno = i + 1
+        mb = bands.get(cno) or {}
+        dye = str(mb.get("DyeName") or "").replace("Leica/", "").strip()
+        try:
+            b = float(mb.get("TargetWaveLengthBegin") or 0)
+            e = float(mb.get("TargetWaveLengthEnd") or 0)
+        except Exception:                        # noqa: BLE001
+            b = e = 0.0
+        ex, em = int(round(b)), int(round(e))
+        lutname = lut.get(cno, "")
+        low = lutname.lower()
+        # 通道名只放染料/序号 —— 波段由界面自己拼（card 会另加 "ex→em"，否则会重复）
+        name = dye if dye else ("CH%d" % cno)
+        is_gray = low in ("gray", "grey")
+        light = "Transmitted Light" if is_gray else ("Fluorescence" if (ex or em) else "")
+        col = _LUT_COLORS.get(low)
+        lo, hi = 0.0, maxv
+        try:
+            sc = scaling[cno - 1] or {}
+            lo = float(sc.get("BlackValue", 0.0)) * maxv
+            hi = float(sc.get("WhiteValue", 1.0)) * maxv
+            if hi <= lo:
+                hi = maxv
+        except Exception:                        # noqa: BLE001
+            pass
+        out.append(dict(name=name, dye=dye, light=light, ex=ex, em=em,
+                        color=col, gray=is_gray, black=lo, white=hi))
+    return out
+
+
+def _lif_channels(im, nch, maxv):
+    """按 LIF 元数据建通道表；元数据不全时退回 _assign_roles。"""
+    info = _lif_channel_dicts(im, nch, maxv)
+    if not any(d["color"] or d["ex"] or d["dye"] for d in info):
+        chans = [dict(name="CH%d" % (i + 1), light="", ex=0, em=0) for i in range(nch)]
+        return _assign_roles(chans, 8 if maxv <= 255 else 12)
+    fallback = [GREEN, RED, MAGENTA, CYAN, BLUE, YELLOW]
+    out = []
+    for i, d in enumerate(info):
+        role = "gray" if d["gray"] else "green"
+        color = d["color"] or (GRAY if d["gray"] else fallback[i % len(fallback)])
+        out.append(Channel(i, d["name"], d["light"], d["ex"], d["em"],
+                           color, d["black"], max(1.0, d["white"]), role=role))
+    return out
+
+def _probe_lif(path, item, index=None, ims=None, f=None):
+    """徕卡 LIF/LOF/XLIF 等：像素、通道、帧数、标定（坐标值单位是米）。
+
+    ims / f 传入时复用已打开的文件（33 个序列逐个重开 126MB 文件太慢）。
+    """
     import liffile
-    with liffile.LifFile(path) as f:
-        ims = list(iter(f.images))
+    own = f is None
+    f = f or liffile.LifFile(path)
+    try:
+        ims = ims if ims is not None else list(iter(f.images))
         if not ims:
             raise ValueError("LIF 里没有图像")
         if index is None:
@@ -507,12 +588,12 @@ def _probe_lif(path, item, index=None):
         if um > 0:
             item.umpp = um
             item.calib = "LIF 内嵌标定"
+        maxv = 65535.0 if item.bits >= 16 else 255.0
         if samples == 3:
             item.channels = [Channel(i, n, "", 0, 0, (255, 255, 255), 0.0, 255.0, role="rgb")
                              for i, n in enumerate(("红", "绿", "蓝"))]
         else:
-            chans = [dict(name="CH%d" % (i + 1), light="", ex=0, em=0) for i in range(nch)]
-            item.channels = _assign_roles(chans, item.bits)
+            item.channels = _lif_channels(im, nch, maxv)
         if len(ims) > 1 and index is not None:
             item.name = "%s · 序列 %d/%d" % (os.path.basename(path), index + 1, len(ims))
             item.note = ("Leica LIF · 第 %d/%d 个序列（%s），尺寸 %d×%d"
@@ -521,6 +602,12 @@ def _probe_lif(path, item, index=None):
         else:
             item.note = "Leica LIF · 共 %d 个序列（取最大的一张：%s）" % (
                 len(ims), getattr(im, "name", "?"))
+    finally:
+        if own:
+            try:
+                f.close()
+            except Exception:                    # noqa: BLE001
+                pass
     return item
 
 
@@ -540,14 +627,18 @@ def probe_all(path, group="g1"):
             n = 0
         if n > 1:
             out = []
-            for i in range(n):
-                it = ImageItem(path="%s#%d" % (path, i + 1), group=group)
-                try:
-                    _probe_lif(path, it, index=i)
-                except Exception as exc:         # noqa: BLE001
-                    it.note = "读取失败：%s" % exc
-                    it.calib = "失败"
-                out.append(it)
+            import liffile
+            with liffile.LifFile(path) as f:
+                ims = list(iter(f.images))
+                for i in range(n):
+                    it = ImageItem(path="%s#%d" % (path, i + 1), group=group)
+                    try:
+                        _probe_lif(path, it, index=i, ims=ims, f=f)
+                    except Exception as exc:     # noqa: BLE001
+                        it.note = "读取失败：%s" % exc
+                        it.calib = "失败"
+                        _LIF_FAILED.append(str(exc))
+                    out.append(it)
             return out
     return [probe(path, group)]
 
@@ -559,9 +650,8 @@ def _load_lif(item):
         im = ims[item.series] if 0 <= item.series < len(ims) else _lif_pick(ims)
         arr = np.asarray(im.asarray())
         sizes = dict(getattr(im, "sizes", {}) or {})
-        axes = getattr(im, "axes", "") or ""
-        if isinstance(axes, (list, tuple)):
-            axes = "".join(str(a) for a in axes)
+        dims = getattr(im, "dims", None) or getattr(im, "axes", None) or ""
+        axes = "".join(str(a) for a in dims) if isinstance(dims, (list, tuple)) else str(dims)
     nch = max(1, int(sizes.get("C", 1) or 1))
     samples = 3 if int(sizes.get("S", 1) or 1) >= 3 else 1
     if samples == 3:
